@@ -1,0 +1,157 @@
+import type { AssetType, Timeframe } from "./types";
+
+export function cls(...parts: Array<string | false | null | undefined>): string {
+  return parts.filter(Boolean).join(" ");
+}
+
+export function uid(): string {
+  return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
+}
+
+export const TF_LIST: Timeframe[] = ["5m", "15m", "30m", "1h", "4h", "1d"];
+
+export const HTF_MAP: Record<Timeframe, Timeframe> = {
+  "5m": "15m", "15m": "1h", "30m": "1h", "1h": "4h", "4h": "1d", "1d": "1d",
+};
+export const LTF_MAP: Record<Timeframe, Timeframe> = {
+  "5m": "5m", "15m": "5m", "30m": "15m", "1h": "15m", "4h": "1h", "1d": "4h",
+};
+
+export const TF_MINUTES: Record<Timeframe, number> = {
+  "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440,
+};
+
+export function fmtPrice(n: number, asset?: AssetType): string {
+  if (!isFinite(n)) return "—";
+  const abs = Math.abs(n);
+  let digits = 2;
+  if (asset === "crypto") digits = abs >= 1000 ? 2 : abs >= 1 ? 3 : 5;
+  else if (asset === "forex") digits = abs >= 100 ? 3 : 5;
+  else digits = abs >= 100 ? 2 : 3;
+  return n.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+export function fmtMoney(n: number, compact = false): string {
+  if (!isFinite(n)) return "—";
+  if (compact && Math.abs(n) >= 10000) {
+    return (n < 0 ? "-$" : "$") + (Math.abs(n) / 1000).toFixed(1) + "k";
+  }
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+}
+
+export function fmtPct(n: number, signed = true): string {
+  if (!isFinite(n)) return "—";
+  const s = signed && n > 0 ? "+" : "";
+  return s + n.toFixed(2) + "%";
+}
+
+export function fmtNum(n: number, d = 2): string {
+  if (!isFinite(n)) return "—";
+  return n.toFixed(d);
+}
+
+export function fmtTime(t: number, tf?: Timeframe): string {
+  const d = new Date(t);
+  if (tf === "1d") return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" });
+  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+export function fmtAgo(t: number): string {
+  const s = Math.max(1, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+export function normSymbol(raw: string, asset: AssetType): string {
+  const s = raw.trim().toUpperCase().replace(/[\s/]/g, "");
+  if (asset === "crypto") {
+    if (!s) return "BTCUSDT";
+    if (/^(BTC|ETH|SOL|BNB|XRP|ADA|DOGE|AVAX|LINK|DOT|LTC|MATIC|TON|TRX)$/.test(s)) return s + "USDT";
+    if (!s.endsWith("USDT") && !s.endsWith("USDC") && !s.endsWith("FDUSD")) return s + "USDT";
+    return s;
+  }
+  if (asset === "forex") {
+    const clean = s.replace(/[=X]/g, "").replace(/-/, "").slice(0, 6);
+    return clean.length >= 6 ? clean : s;
+  }
+  return s.replace(/[^A-Z.\-]/g, "") || "AAPL";
+}
+
+export function yahooSymbol(symbol: string, asset: AssetType): string {
+  if (asset === "forex") return symbol.replace(/-/, "").toUpperCase() + "=X";
+  return symbol.toUpperCase();
+}
+
+export function okxInstId(symbol: string): string {
+  const s = symbol.toUpperCase();
+  if (s.endsWith("USDT")) return s.slice(0, -4) + "-USDT";
+  if (s.endsWith("USDC")) return s.slice(0, -4) + "-USDC";
+  return s + "-USDT";
+}
+
+export function stooqSymbol(symbol: string, asset: AssetType): string {
+  const s = symbol.toLowerCase().replace(/[=]/g, "").replace(/-/, "");
+  if (asset === "stock") return s + ".us";
+  return s;
+}
+
+export async function fetchWithTimeout(url: string, ms: number, init?: RequestInit): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal, headers: { Accept: "application/json,text/csv,*/*", ...(init?.headers || {}) } });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function withRetries<T>(fn: () => Promise<T>, retries: number, label: string, onAttempt?: (msg: string) => void): Promise<T> {
+  let lastErr: unknown = null;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i < retries) onAttempt?.(`retry ${label} (${i + 1}/${retries})…`);
+      await new Promise((r) => setTimeout(r, 350 * (i + 1)));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(label));
+}
+
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+export function last<T>(arr: T[]): T { return arr[arr.length - 1]; }
+
+export function lastValid(arr: number[]): number {
+  for (let i = arr.length - 1; i >= 0; i--) if (isFinite(arr[i])) return arr[i];
+  return NaN;
+}
+
+export function loadLS<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
+  } catch { return fallback; }
+}
+
+export function saveLS<T>(key: string, value: T): void {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota */ }
+}

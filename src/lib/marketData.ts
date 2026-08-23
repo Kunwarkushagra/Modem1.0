@@ -178,9 +178,10 @@ export async function fetchHistory(
   tf: Timeframe,
   days: number,
   log?: (msg: string, kind?: "info" | "ok" | "warn" | "err") => void,
+  maxCandles = 1600,
 ): Promise<FetchResult> {
   const symbol = normSymbol(rawSymbol, asset);
-  const need = Math.min(Math.ceil((days * 1440) / TF_MINUTES[tf]) + 220, 1600);
+  const need = Math.min(Math.ceil((days * 1440) / TF_MINUTES[tf]) + 220, maxCandles);
 
   if (asset === "crypto") {
     try {

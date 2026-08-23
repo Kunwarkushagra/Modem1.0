@@ -26,6 +26,9 @@ export interface RawSetup {
   news_caution: string | null;
   risk_management_note: string | null;
   isBreakout?: boolean;
+  /** true when the TP comes from a real detected level (pool/SR/range extreme), false when floored to a pure R multiple */
+  tp1Objective?: boolean;
+  tp2Objective?: boolean;
 }
 
 export interface EngineSetup extends RawSetup {
@@ -430,10 +433,12 @@ export function localSetups(ctx: EngineCtx): EngineSetup[] {
       const sl = slBase - 0.3 * atrV;
       const risk = entry - sl;
       if (risk > 0) {
-        let tp1 = Math.min(buyLiq[0]?.price ?? Infinity, resist[0]?.price ?? Infinity);
-        if (!isFinite(tp1) || tp1 - entry < 2.05 * risk) tp1 = entry + 2.05 * risk;
-        let tp2 = buyLiq[1]?.price ?? smc.pd.rangeHigh;
-        if (tp2 - entry < 2.8 * risk) tp2 = entry + 3.2 * risk;
+        const tp1Raw = Math.min(buyLiq[0]?.price ?? Infinity, resist[0]?.price ?? Infinity);
+        const tp1Objective = isFinite(tp1Raw) && tp1Raw - entry >= 2.05 * risk;
+        const tp1 = tp1Objective ? tp1Raw : entry + 2.05 * risk;
+        const tp2Raw = buyLiq[1]?.price ?? smc.pd.rangeHigh;
+        const tp2Objective = tp2Raw - entry >= 2.8 * risk;
+        const tp2 = tp2Objective ? tp2Raw : entry + 3.2 * risk;
         const est = boost(conf);
         if (est >= 60) {
           const sigType: SignalType = recentSweepSell ? "sweep" : "zone";
@@ -443,6 +448,7 @@ export function localSetups(ctx: EngineCtx): EngineSetup[] {
           });
           out.push({
             direction: "Long", entry_price: entry, stop_loss: sl, take_profit1: tp1, take_profit2: tp2,
+            tp1Objective, tp2Objective,
             estimated_win_rate_percent: est, confidence_score_0_100: Math.min(92, est + (htfAlignBull ? 3 : 0)),
             invalidation_level: slBase - 0.6 * atrV,
             trade_rationale: `${recentSweepSell ? `Sell-side liquidity at ${fmtPrice(recentSweepSell.price, params.assetType)} was swept ${n - recentSweepSell.i} candles ago (SL hunt), ` : `Price is in the discount leg of the dealing range (${smc.pd.position}), `}then tapped the active ${z.kind === "bull_fvg" ? "bullish FVG" : z.kind === "breaker_bull" ? "bullish breaker" : "bullish order block"} [${fmtPrice(z.bottom, params.assetType)}–${fmtPrice(z.top, params.assetType)}]. ${chochBull ? `${chochBull.type} bullish confirmed at ${fmtPrice(chochBull.level, params.assetType)}. ` : ""}${patternBull ? `${patternBull.name} printed at the level. ` : ""}HTF bias ${ctx.htfBias}. Invalidation below the ${recentSweepSell ? "sweep low" : "block"} — a close there voids the premise.`.trim(),
@@ -477,10 +483,12 @@ export function localSetups(ctx: EngineCtx): EngineSetup[] {
       const sl = slBase + 0.3 * atrV;
       const risk = sl - entry;
       if (risk > 0) {
-        let tp1 = Math.max(sellLiq[0]?.price ?? -Infinity, support[0]?.price ?? -Infinity);
-        if (!isFinite(tp1) || entry - tp1 < 2.05 * risk) tp1 = entry - 2.05 * risk;
-        let tp2 = sellLiq[1]?.price ?? smc.pd.rangeLow;
-        if (entry - tp2 < 2.8 * risk) tp2 = entry - 3.2 * risk;
+        const tp1Raw = Math.max(sellLiq[0]?.price ?? -Infinity, support[0]?.price ?? -Infinity);
+        const tp1Objective = isFinite(tp1Raw) && entry - tp1Raw >= 2.05 * risk;
+        const tp1 = tp1Objective ? tp1Raw : entry - 2.05 * risk;
+        const tp2Raw = sellLiq[1]?.price ?? smc.pd.rangeLow;
+        const tp2Objective = entry - tp2Raw >= 2.8 * risk;
+        const tp2 = tp2Objective ? tp2Raw : entry - 3.2 * risk;
         const est = boost(conf);
         if (est >= 60) {
           const sigType: SignalType = recentSweepBuy ? "sweep" : "zone";
@@ -490,6 +498,7 @@ export function localSetups(ctx: EngineCtx): EngineSetup[] {
           });
           out.push({
             direction: "Short", entry_price: entry, stop_loss: sl, take_profit1: tp1, take_profit2: tp2,
+            tp1Objective, tp2Objective,
             estimated_win_rate_percent: est, confidence_score_0_100: Math.min(92, est + (htfAlignBear ? 3 : 0)),
             invalidation_level: slBase + 0.6 * atrV,
             trade_rationale: `${recentSweepBuy ? `Buy-side liquidity at ${fmtPrice(recentSweepBuy.price, params.assetType)} was swept ${n - recentSweepBuy.i} candles ago (SL hunt), ` : `Price is in the premium leg of the dealing range (${smc.pd.position}), `}then rejected from the active ${z.kind === "bear_fvg" ? "bearish FVG" : z.kind === "breaker_bear" ? "bearish breaker" : "bearish order block"} [${fmtPrice(z.bottom, params.assetType)}–${fmtPrice(z.top, params.assetType)}]. ${chochBear ? `${chochBear.type} bearish confirmed at ${fmtPrice(chochBear.level, params.assetType)}. ` : ""}${patternBear ? `${patternBear.name} printed at the level. ` : ""}HTF bias ${ctx.htfBias}. Invalidation above the ${recentSweepBuy ? "sweep high" : "block"} — a close there voids the premise.`.trim(),
@@ -528,6 +537,7 @@ export function localSetups(ctx: EngineCtx): EngineSetup[] {
         invalidation_level: sl,
         trade_rationale: `Confirmed breakout ${bo.dir === "bull" ? "above" : "below"} ${fmtPrice(bo.level, params.assetType)} with ${bo.closesBeyond} closes beyond the level and volume above the 20-period average (false-breakout filter passed). Retest entry at the broken level; failure to hold it invalidates.`,
         confluences: conf, news_caution: newsNote, risk_management_note: riskNote, isBreakout: true,
+        tp1Objective: false, tp2Objective: false,
         signal,
         reasoning: buildReasoning(ctx, dir as "Long" | "Short", {
           zone: null, sweepI: null, sweepPrice: null,
@@ -605,6 +615,8 @@ export function validateSetup(raw: EngineSetup, ctx: EngineCtx): TradeSetup {
     source: "engine",
     signal: raw.signal,
     reasoning,
+    tp1_objective: raw.tp1Objective,
+    tp2_objective: raw.tp2Objective,
   };
 }
 

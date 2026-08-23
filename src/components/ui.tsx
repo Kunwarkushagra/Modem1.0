@@ -40,6 +40,7 @@ export const ICandles = (p: IconProps) => svg(p, <><path d="M5 9V5M5 15v3" /><re
 export const ILayers = (p: IconProps) => svg(p, <><path d="M12 3l9 5-9 5-9-5z" /><path d="M3.5 12.5L12 17l8.5-4.5" /><path d="M3.5 16.5L12 21l8.5-4.5" /></>);
 export const IClock = (p: IconProps) => svg(p, <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></>);
 export const IBrain = (p: IconProps) => svg(p, <><path d="M9.5 4A2.8 2.8 0 0 0 6 6.7 3.2 3.2 0 0 0 4 12a3.3 3.3 0 0 0 1.5 5.6A3 3 0 0 0 9 20.5c1 0 1.8-.4 2.4-1V5.4A2.7 2.7 0 0 0 9.5 4z" /><path d="M14.5 4A2.8 2.8 0 0 1 18 6.7 3.2 3.2 0 0 1 20 12a3.3 3.3 0 0 1-1.5 5.6 3 3 0 0 1-3.5 2.9c-1 0-1.8-.4-2.4-1V5.4A2.7 2.7 0 0 1 14.5 4z" /></>);
+export const IScale = (p: IconProps) => svg(p, <><path d="M12 4v16M8 20h8M12 4l-6 3M12 4l6 3" /><path d="M6 7l-2.6 5.2a3 3 0 0 0 5.2 0z" /><path d="M18 7l-2.6 5.2a3 3 0 0 0 5.2 0z" /></>);
 
 /* ---------- primitives ---------- */
 

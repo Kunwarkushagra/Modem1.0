@@ -1,7 +1,10 @@
+import type { TmVariantId } from "./tmVariant";
+
 export type AssetType = "crypto" | "stock" | "forex";
 export type Timeframe = "5m" | "15m" | "30m" | "1h" | "4h" | "1d";
 export type Bias = "bullish" | "bearish" | "ranging";
 export type Direction = "Long" | "Short";
+export type { TmVariantId };
 
 export interface Candle { t: number; o: number; h: number; l: number; c: number; v: number }
 
@@ -150,6 +153,9 @@ export interface TradeSetup {
   source: string;
   signal?: SignalInfo;
   reasoning?: Reasoning;
+  /** TP derived from a real level (pool/SR/range extreme) rather than a pure R multiple — used by tm110 runner selection */
+  tp1_objective?: boolean;
+  tp2_objective?: boolean;
 }
 
 export interface ValidationCheck { name: string; passed: boolean; detail: string }
@@ -218,6 +224,10 @@ export type TradeOutcome = "win" | "loss" | "breakeven";
 export type TradeStatus = "pending" | "closed";
 export type TradeSource = "ai" | "manual" | "backtest";
 
+/** Trade-management variant. Entry logic is identical for both — only exit management differs. */
+export type TmMode = "classic" | "tm110";
+export type ExitKind = "target" | "be" | "stop" | "time";
+
 export interface Trade {
   id: string;
   symbol: string;
@@ -279,6 +289,8 @@ export interface BacktestTrade {
   confluences: string[];
   signalType: SignalType;
   generatedAt: number;
+  partialHit: boolean; // tm110: 50% partial filled at +1.0R (always false on baseline)
+  exitKind: ExitKind;  // target = objective filled · be = breakeven stop · stop = full stop-out · time = 60-bar mark
 }
 
 export interface ExpiryLogItem { i: number; t: number; direction: Direction; signalType: SignalType; reason: string }
@@ -296,6 +308,7 @@ export interface CostModel { makerPct: number; takerPct: number; slippagePct: nu
 
 export interface BacktestResult {
   params: { symbol: string; assetType: AssetType; timeframe: Timeframe; days: number };
+  tmMode: TmMode;
   totalCandles: number;
   trades: BacktestTrade[];
   skippedInvalid: number;
@@ -310,8 +323,79 @@ export interface BacktestResult {
   netR: number;
   grossR: number;
   equityR: number[];   // NET equity curve
+  // per-trade aggregates (net ledger)
+  grossPerTrade: number;
+  costPerTrade: number;
+  netPerTrade: number;
+  partialRate: number;   // % of trades where the +1R partial filled (tm110)
+  beRate: number;        // % closed at breakeven stop
+  stopOutRate: number;   // % fully stopped out
+  avgWinR: number;
+  avgLossR: number;
+  longs: number;
+  shorts: number;
   durationMs: number;
   dataSource: string;
+}
+
+/* ---------------- variant benchmark ---------------- */
+
+export type BenchSegment = "CAL" | "VAL" | "OOS";
+
+export interface SegmentStats {
+  segment: BenchSegment;
+  trades: number;
+  wins: number;
+  losses: number;
+  be: number;
+  winRate: number;
+  grossPerTrade: number;
+  costPerTrade: number;
+  netPerTrade: number;
+  pf: number;
+  maxDDR: number;
+  partialRate: number;
+  beRate: number;
+  stopOutRate: number;
+  avgWinR: number;
+  avgLossR: number;
+  longs: number;
+  shorts: number;
+  tradesPerMonth: number;
+}
+
+export interface ThresholdCheck {
+  id: string;
+  label: string;
+  detail: string;
+  pass: boolean;
+}
+
+export interface BenchWindowSpec {
+  symbol: string;
+  assetType: AssetType;
+  timeframe: Timeframe;
+  days: number;
+  label: string;
+}
+
+export interface BenchWindowReport {
+  window: BenchWindowSpec;
+  candles: number;
+  dataSource: string;
+  segments: Record<TmMode, SegmentStats[]>; // [CAL, VAL, OOS]
+  checks: ThresholdCheck[];
+  verdict: "PASS" | "FAIL" | "INSUFFICIENT";
+  valTrades: number; // variant VAL sample size
+  baselineValTrades: number;
+  elapsedMs: number;
+}
+
+export interface BenchReport {
+  ranAt: number;
+  elapsedMs: number;
+  aborted: boolean;
+  windows: BenchWindowReport[];
 }
 
 export interface LogLine { t: number; msg: string; kind: "info" | "ok" | "warn" | "err" }

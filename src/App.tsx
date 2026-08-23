@@ -6,16 +6,18 @@ import type { TickerQuote } from "./lib/marketData";
 import { loadSettings, loadTrades, saveSettings } from "./lib/journal";
 import type { Trade } from "./lib/types";
 import { fmtMoney, fmtPrice, cls } from "./lib/utils";
-import { Badge, IBook, IGear, ILogo, IRadar, IFlask, IShield, ToastProvider } from "./components/ui";
+import { Badge, IBook, ICandles, IGear, ILogo, IRadar, IFlask, IShield, ToastProvider } from "./components/ui";
 import { TerminalView } from "./components/TerminalView";
+import { RadarView } from "./components/RadarView";
 import { JournalView } from "./components/JournalView";
 import { BacktestView } from "./components/BacktestView";
 import { RiskView, SettingsView } from "./components/RiskSettingsView";
 
-type View = "terminal" | "journal" | "backtest" | "risk" | "settings";
+type View = "terminal" | "radar" | "journal" | "backtest" | "risk" | "settings";
 
 const NAV: Array<{ v: View; label: string; icon: (p: { size?: number; className?: string }) => ReactNode }> = [
-  { v: "terminal", label: "Terminal", icon: IRadar },
+  { v: "terminal", label: "Terminal", icon: ICandles },
+  { v: "radar", label: "Radar", icon: IRadar },
   { v: "journal", label: "Journal", icon: IBook },
   { v: "backtest", label: "Backtest", icon: IFlask },
   { v: "risk", label: "Risk", icon: IShield },
@@ -69,13 +71,27 @@ function Shell() {
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [trades, setTrades] = useState<Trade[]>(() => loadTrades());
   const [btPrefill, setBtPrefill] = useState<{ symbol: string; assetType: AssetType; timeframe: Timeframe; runId: number } | null>(null);
+  const [termHandoff, setTermHandoff] = useState<{ symbol: string; assetType: AssetType; timeframe: Timeframe; runId: number } | null>(null);
 
   const reloadTrades = useCallback(() => setTrades(loadTrades()), []);
   const persistSettings = useCallback((s: Settings) => { setSettings(s); saveSettings(s); }, []);
 
+  const patchSettings = useCallback((patch: Partial<Settings>) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...patch };
+      saveSettings(next);
+      return next;
+    });
+  }, []);
+
   const gotoBacktest = useCallback((p: { symbol: string; assetType: AssetType; timeframe: Timeframe }) => {
     setBtPrefill({ ...p, runId: Date.now() });
     setView("backtest");
+  }, []);
+
+  const openInTerminal = useCallback((p: { symbol: string; assetType: AssetType; timeframe: Timeframe }) => {
+    setTermHandoff({ ...p, runId: Date.now() });
+    setView("terminal");
   }, []);
 
   const openCount = useMemo(() => trades.filter((t) => t.status === "pending").length, [trades]);
@@ -126,7 +142,10 @@ function Shell() {
       {/* main */}
       <main className="mx-auto w-full max-w-[1560px] flex-1 px-4 py-4">
         {view === "terminal" && (
-          <TerminalView settings={settings} onTradesChanged={reloadTrades} onGotoBacktest={gotoBacktest} onOpenSettings={() => setView("settings")} />
+          <TerminalView settings={settings} onTradesChanged={reloadTrades} onGotoBacktest={gotoBacktest} onOpenSettings={() => setView("settings")} handoff={termHandoff} />
+        )}
+        {view === "radar" && (
+          <RadarView settings={settings} onSettingsChange={patchSettings} onOpenInTerminal={openInTerminal} />
         )}
         {view === "journal" && <JournalView trades={trades} onChanged={reloadTrades} />}
         {view === "backtest" && <BacktestView prefill={btPrefill} />}

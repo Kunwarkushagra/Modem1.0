@@ -66,6 +66,7 @@ export function TerminalView(props: {
   onTradesChanged: () => void;
   onGotoBacktest: (prefill: { symbol: string; assetType: AssetType; timeframe: Timeframe }) => void;
   onOpenSettings: () => void;
+  handoff?: { symbol: string; assetType: AssetType; timeframe: Timeframe; runId: number } | null;
 }) {
   const { settings } = props;
   const toast = useToast();
@@ -133,6 +134,23 @@ export function TerminalView(props: {
     const t = setInterval(() => { if (!analyzing) void run(true); }, 90_000);
     return () => clearInterval(t);
   }, [settings.autoRefresh, analyzing, run]);
+
+  // radar handoff: load the symbol the radar pointed at, then run once
+  const pendingHandoff = useRef(false);
+  useEffect(() => {
+    if (!props.handoff) return;
+    setAssetType(props.handoff.assetType);
+    setSymbolInput(props.handoff.symbol);
+    setTimeframe(props.handoff.timeframe);
+    pendingHandoff.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.handoff?.runId]);
+  useEffect(() => {
+    if (pendingHandoff.current && !analyzing) {
+      pendingHandoff.current = false;
+      void run();
+    }
+  }, [run, analyzing]);
 
   // live price tick
   useEffect(() => {

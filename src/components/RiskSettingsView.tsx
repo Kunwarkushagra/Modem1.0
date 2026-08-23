@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
-import type { AssetType, Settings, Trade } from "../lib/types";
+import type { Settings, Trade } from "../lib/types";
 import { computePosition, sendTelegram } from "../lib/ai";
-import { deleteTrade } from "../lib/journal";
+import { deleteTrade, normaliseRadarSymbols } from "../lib/journal";
 import { fmtMoney, fmtNum, saveLS, cls } from "../lib/utils";
-import { Badge, Btn, Card, IGear, IShield, IZap, Stat, useToast } from "./ui";
+import { Badge, Btn, Card, IGear, IRadar, IShield, IZap, Stat, useToast } from "./ui";
 
 const inp = "w-full rounded-md border border-ink-500 bg-ink-900 px-2.5 py-1.5 font-mono text-xs text-fog-100 outline-none focus:border-gold-600/70";
 const lbl = "mb-1 block font-mono text-[10px] tracking-widest text-fog-500";
@@ -212,6 +212,41 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
             <Btn variant="outline" size="sm" onClick={() => void testTelegram()} disabled={tgTesting}>{tgTesting ? "SENDING…" : "SEND TEST MESSAGE"}</Btn>
             <Badge tone="dim">fires when a setup passes all validation checks</Badge>
           </div>
+        </Card>
+
+        <Card icon={<IRadar size={15} />} title="Top Setups Radar (display layer)">
+          <label className="block">
+            <span className={lbl}>SYMBOL UNIVERSE · one per line or comma-separated (uppercase, deduped)</span>
+            <textarea rows={4} defaultValue={s.radarSymbols.join("\n")}
+              onBlur={(e) => {
+                const list = normaliseRadarSymbols(e.target.value);
+                e.target.value = list.join("\n");
+                if (!list.length) { toast.push("err", "Universe needs at least one valid symbol"); return; }
+                save({ radarSymbols: list }, `Radar universe: ${list.length} symbols`);
+              }}
+              className={cls(inp, "leading-relaxed")} spellCheck={false} />
+          </label>
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className={lbl}>QUALITY FLOOR (0–100)</span>
+              <input type="number" min={0} max={100} defaultValue={s.radarQualityFloor}
+                onBlur={(e) => {
+                  const v = Math.max(0, Math.min(100, Number(e.target.value) || 55));
+                  e.target.value = String(v);
+                  save({ radarQualityFloor: v }, `Radar quality floor: ${v}`);
+                }} className={inp} />
+            </label>
+            <div className="flex items-end pb-1">
+              <button type="button" onClick={() => save({ radarSound: !s.radarSound }, `Radar sound ${!s.radarSound ? "on" : "off"}`)}
+                className={cls("tv-btn flex w-full items-center justify-between rounded-md border px-3 py-2 font-mono text-[10.5px] font-bold tracking-widest",
+                  s.radarSound ? "border-bull-600 bg-bull-500/12 text-bull-400" : "border-ink-600 text-fog-400")}>
+                <span>ALERT SOUND</span><span>{s.radarSound ? "ON" : "OFF"}</span>
+              </button>
+            </div>
+          </div>
+          <p className="mt-3 text-[11px] leading-relaxed text-fog-400">
+            The radar re-runs the <span className="text-fog-200">same live engine</span> (confirmed candles only) for every symbol on each setup-TF close. It is display-only: no auto-trade, no position sizing. Candidates below the floor are never shown; stale feeds get a DATA STALE badge while others keep scanning.
+          </p>
         </Card>
 
         <Card icon={<IGear size={15} />} title="Data & Storage">

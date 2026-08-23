@@ -467,6 +467,8 @@ export interface BenchWindowReport {
   verdict: "PASS" | "FAIL" | "INSUFFICIENT";
   valTrades: number; // variant VAL sample size
   baselineValTrades: number;
+  /** FREQUENCY GUARD — full-run closed trades must stay ≥ max(0.8 × baseline, 50), else the variant FAILS and its soft additions are suspended */
+  freqGuard: { baselineTrades: number; advTrades: number; floor: number; pass: boolean };
   elapsedMs: number;
 }
 

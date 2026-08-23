@@ -4,7 +4,7 @@ import type {
 } from "./types";
 import { fetchHistory } from "./marketData";
 import { runBacktestOnCandles } from "./backtest";
-import { BASELINE_VARIANT, MIN_VAL_TRADES, PASS_THRESHOLDS, TEST_VARIANT, TM_VARIANTS } from "./tmVariant";
+import { BASELINE_VARIANT, freqFloor, LS_BENCH_KEY, MIN_VAL_TRADES, PASS_THRESHOLDS, TEST_VARIANT, TM_VARIANTS } from "./tmVariant";
 import type { TmVariantId } from "./tmVariant";
 import { loadLS, saveLS, TF_MINUTES } from "./utils";
 
@@ -18,15 +18,14 @@ export const BENCH_WINDOWS: BenchWindowSpec[] = [
   { symbol: "BTCUSDT", assetType: "crypto", timeframe: "15m", days: 90, label: "BTC · 15M · 90D" },
 ];
 
-const LS_KEY = "tv_bench_v1";
 const SEG_ORDER: BenchSegment[] = ["CAL", "VAL", "OOS"];
 
 export function loadBenchReport(): BenchReport | null {
-  return loadLS<BenchReport | null>(LS_KEY, null);
+  return loadLS<BenchReport | null>(LS_BENCH_KEY, null);
 }
 
 function saveBenchReport(r: BenchReport): void {
-  saveLS(LS_KEY, r);
+  saveLS(LS_BENCH_KEY, r);
 }
 
 /** Chronological 60/20/20 split by trade entry time. OOS is evaluated once, never iterated on. */
@@ -126,6 +125,7 @@ async function runBenchWindow(
   log(`window ${w.label}: ${candles.length} candles from ${hist.source} — both variants run on this exact series`, "ok");
 
   const segments = {} as Record<TmVariantId, SegmentStats[]>;
+  const fullRun = {} as Record<TmVariantId, number>;
   for (const v of TM_VARIANTS) {
     const res = await runBacktestOnCandles(
       candles,
@@ -136,6 +136,7 @@ async function runBenchWindow(
       hist.source,
       v.advQuality,
     );
+    fullRun[v.id] = res.trades.length; // full-run closed trades (incl. time-marked) — pre-split
     const split = splitTrades(res.trades, t0ts, tEnd);
     segments[v.id] = SEG_ORDER.map((seg) => computeSegmentStats(seg, split[seg], w.days * (seg === "CAL" ? 0.6 : 0.2)));
   }
@@ -143,12 +144,30 @@ async function runBenchWindow(
   // variant under test = newest (ADV v1.2.0); reference = BASELINE v1.0.0
   const vVal = segments[TEST_VARIANT.id][1];
   const bVal = segments[BASELINE_VARIANT.id][1];
-  const { checks, verdict } = evaluateThresholds(vVal, bVal);
+  const { checks, verdict: valVerdict } = evaluateThresholds(vVal, bVal);
+
+  /* ---- FREQUENCY GUARD: full-run closed trades must stay ≥ max(0.8 × baseline, 50) ---- */
+  const baselineTrades = fullRun[BASELINE_VARIANT.id];
+  const advTrades = fullRun[TEST_VARIANT.id];
+  const floor = freqFloor(baselineTrades);
+  const guardPass = advTrades >= floor;
+  const freqGuard = { baselineTrades, advTrades, floor: Number(floor.toFixed(1)), pass: guardPass };
+  checks.push({
+    id: "T5",
+    label: `FREQUENCY GUARD — full-run trades ≥ max(0.8 × baseline, 50)`,
+    detail: `${advTrades} adv vs ${baselineTrades} baseline · floor ${floor.toFixed(1)}`,
+    pass: guardPass,
+  });
+  const verdict: BenchWindowReport["verdict"] = !guardPass ? "FAIL" : valVerdict;
 
   log(
-    `window ${w.label}: VAL net/t ${BASELINE_VARIANT.short} ${bVal.netPerTrade.toFixed(3)} vs ${TEST_VARIANT.short} ${vVal.netPerTrade.toFixed(3)} → ${verdict}` +
-      (verdict === "INSUFFICIENT" ? ` (VAL sample ${vVal.trades} < ${MIN_VAL_TRADES} — NO CONCLUSION)` : ""),
-    verdict === "FAIL" ? "warn" : "info",
+    `window ${w.label}: VAL net/t ${BASELINE_VARIANT.short} ${bVal.netPerTrade.toFixed(3)} vs ${TEST_VARIANT.short} ${vVal.netPerTrade.toFixed(3)} → ${valVerdict}` +
+      (valVerdict === "INSUFFICIENT" ? ` (VAL sample ${vVal.trades} < ${MIN_VAL_TRADES} — NO CONCLUSION)` : ""),
+    valVerdict === "FAIL" ? "warn" : "info",
+  );
+  log(
+    `window ${w.label}: FREQUENCY GUARD — adv ${advTrades} / baseline ${baselineTrades} (floor ${floor.toFixed(1)}) → ${guardPass ? "PASS" : "FAIL — ADV SOFT LAYERS WILL BE SUSPENDED"}`,
+    guardPass ? "ok" : "err",
   );
 
   return {
@@ -160,6 +179,7 @@ async function runBenchWindow(
     verdict,
     valTrades: vVal.trades,
     baselineValTrades: bVal.trades,
+    freqGuard,
     elapsedMs: performance.now() - t0,
   };
 }

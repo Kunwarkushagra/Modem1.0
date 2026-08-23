@@ -1,4 +1,5 @@
 import type { TmMode } from "./types";
+import { loadLS } from "./utils";
 
 /**
  * Variant registry — SCALP-1.0 pre-registered changes.
@@ -8,6 +9,39 @@ import type { TmMode } from "./types";
  * layers differ. Soft layers never add hard vetoes.
  */
 export type TmVariantId = "baseline-v1.0.0" | "scalp10-tm-v1.1.0" | "scalp10-adv-v1.2.0";
+
+/**
+ * FREQUENCY GUARD — quality improvements must not collapse trade frequency.
+ * Per window: if the advanced variant's full-run closed trades fall below
+ * max(0.8 × baseline closed trades, 50), the advanced variant is marked FAIL
+ * and ALL of its soft additions are suspended everywhere in live signal
+ * generation (terminal + radar) until a passing benchmark is stored.
+ * The benchmark itself always runs the advanced variant so the guard can recover.
+ */
+export const FREQUENCY_GUARD = { ratio: 0.8, minTrades: 50 };
+
+export const LS_BENCH_KEY = "tv_bench_v1";
+
+export function freqFloor(baselineTrades: number): number {
+  return Math.max(FREQUENCY_GUARD.ratio * baselineTrades, FREQUENCY_GUARD.minTrades);
+}
+
+export interface FrequencyGate { ok: boolean | null; detail: string }
+
+/** null = no evidence yet (never benchmarked / aborted) — adv stays allowed, guard pending. */
+export function loadFrequencyGate(): FrequencyGate {
+  try {
+    const r = loadLS<{ aborted?: boolean; advFrequencyOk?: boolean | null } | null>(LS_BENCH_KEY, null);
+    if (!r) return { ok: null, detail: "guard pending — run the benchmark to test frequency" };
+    if (r.aborted) return { ok: null, detail: "guard inconclusive — last benchmark aborted" };
+    if (r.advFrequencyOk == null) return { ok: null, detail: "guard pending — report has no evidence" };
+    return r.advFrequencyOk
+      ? { ok: true, detail: `guard passed — adv trades ≥ max(0.8×baseline, ${FREQUENCY_GUARD.minTrades})` }
+      : { ok: false, detail: `guard FAILED — adv soft layers suspended until a passing benchmark` };
+  } catch {
+    return { ok: null, detail: "guard unreadable" };
+  }
+}
 
 export interface TmVariantDef {
   id: TmVariantId;

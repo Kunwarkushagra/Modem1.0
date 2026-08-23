@@ -333,10 +333,12 @@ function gradeLiquidity(touches: number): "A" | "B" | "C" { return touches >= 3 
 function buildReasoning(
   ctx: EngineCtx,
   direction: "Long" | "Short",
-  o: { zone?: { kind: string; top: number; bottom: number; startI: number; mitigated: boolean } | null; sweepI?: number | null; sweepPrice?: number | null; pool?: { kind: string; touches: number; price: number } | null; structEv?: { type: "BOS" | "CHoCH"; dir: "bull" | "bear"; ts: number; level: number } | null; entry: number; plannedRR: number; isBreakout?: boolean },
+  o: { zone?: { kind: string; top: number; bottom: number; startI: number; mitigated: boolean } | null; sweepI?: number | null; sweepPrice?: number | null; pool?: { kind: string; touches: number; price: number } | null; structEv?: { type: "BOS" | "CHoCH"; dir: "bull" | "bear"; ts: number; level: number } | null; entry: number; plannedRR: number; isBreakout?: boolean; pattern?: { name: string; factor: number } | null },
 ): Reasoning {
   const atrV = lastValid(ctx.ind.atr) || 1;
   const session = detectSession(ctx.generatedAt);
+  // adv v1.2.0: sweep event carries soft classifications (dryUp / fakeoutReversal / amdPhase) when detected
+  const sweepEvent = o.sweepI != null ? ctx.smc.sweeps.find((s) => s.i === o.sweepI) ?? null : null;
   const sweep = (() => {
     if (o.sweepI == null || o.sweepPrice == null) return null;
     const sc = ctx.candles[o.sweepI];
@@ -348,8 +350,11 @@ function buildReasoning(
       disp = Math.max(disp, Math.abs(ctx.candles[j].c - ctx.candles[j].o));
     }
     const displacementAtr = Number((disp / atrV).toFixed(2));
-    const trapScore = Math.round(Math.min(100, 40 * Math.min(1, depthAtr / 0.8) + 30 * (reclaim ? 1 : 0.2) + 30 * Math.min(1, displacementAtr / 1.2)));
-    return { depthAtr, reclaim, displacementAtr, trapScore };
+    // adv v1.2.0 soft layer: volume dry-up before the sweep adds +5 to trap score (capped 100)
+    const dryUp = sweepEvent?.dryUp === true;
+    const base = 40 * Math.min(1, depthAtr / 0.8) + 30 * (reclaim ? 1 : 0.2) + 30 * Math.min(1, displacementAtr / 1.2);
+    const trapScore = Math.round(Math.min(100, base + (dryUp ? 5 : 0)));
+    return { depthAtr, reclaim, displacementAtr, trapScore, dryUp, fakeoutReversal: sweepEvent?.fakeoutReversal === true };
   })();
   const zone = (() => {
     if (!o.zone) return null;
@@ -370,6 +375,8 @@ function buildReasoning(
     plannedRR: o.plannedRR,
     entryModel: ENTRY_MODEL,
     rejectionReason: null,
+    patternCtx: o.pattern ?? null,                    // adv v1.2.0: pattern location quality
+    amdPhase: sweepEvent?.amdPhase ?? null,           // adv v1.2.0: AMD manipulation tag
   };
 }
 
@@ -403,8 +410,11 @@ export function localSetups(ctx: EngineCtx): EngineSetup[] {
   const resist = smc.sr.filter((s) => s.kind === "resistance" && s.price > price).sort((a, b) => a.price - b.price);
   const support = smc.sr.filter((s) => s.kind === "support" && s.price < price).sort((a, b) => b.price - a.price);
 
-  const boost = (conf: string[]) => {
-    let w = 58 + 4 * Math.max(0, conf.length - 2);
+  // adv v1.2.0 soft layer: a candlestick pattern far from any valid zone counts as half a confluence
+  // in the quality score only — the entry gates still see the full confluence list (no vetoes added).
+  const boost = (conf: string[], farPattern = false) => {
+    const eff = conf.length - (farPattern ? 0.5 : 0);
+    let w = 58 + 4 * Math.max(0, eff - 2);
     if (ctx.perf.recent.tilt) w -= 6;
     if (ctx.perf.bestConfluences.some((b) => conf.includes(b.confluence))) w += 4;
     if (ctx.perf.worstConfluences.some((b) => conf.includes(b.confluence))) w -= 7;
@@ -439,7 +449,8 @@ export function localSetups(ctx: EngineCtx): EngineSetup[] {
         const tp2Raw = buyLiq[1]?.price ?? smc.pd.rangeHigh;
         const tp2Objective = tp2Raw - entry >= 2.8 * risk;
         const tp2 = tp2Objective ? tp2Raw : entry + 3.2 * risk;
-        const est = boost(conf);
+        const pfBull = patternBull?.locFactor ?? 1;
+        const est = boost(conf, patternBull ? pfBull < 1 : false);
         if (est >= 60) {
           const sigType: SignalType = recentSweepSell ? "sweep" : "zone";
           const signal = makeSignal(sigType, ctx, {
@@ -459,6 +470,7 @@ export function localSetups(ctx: EngineCtx): EngineSetup[] {
               sweepI: recentSweepSell?.i ?? null, sweepPrice: recentSweepSell?.price ?? null,
               pool: buyLiq[0] ? { kind: buyLiq[0].kind, touches: buyLiq[0].touches, price: buyLiq[0].price } : null,
               structEv: structEvOf(chochBull), entry, plannedRR: Number(rrOf(entry, sl, tp1).toFixed(2)),
+              pattern: patternBull ? { name: patternBull.name, factor: pfBull } : null,
             }),
           });
         }
@@ -489,7 +501,8 @@ export function localSetups(ctx: EngineCtx): EngineSetup[] {
         const tp2Raw = sellLiq[1]?.price ?? smc.pd.rangeLow;
         const tp2Objective = entry - tp2Raw >= 2.8 * risk;
         const tp2 = tp2Objective ? tp2Raw : entry - 3.2 * risk;
-        const est = boost(conf);
+        const pfBear = patternBear?.locFactor ?? 1;
+        const est = boost(conf, patternBear ? pfBear < 1 : false);
         if (est >= 60) {
           const sigType: SignalType = recentSweepBuy ? "sweep" : "zone";
           const signal = makeSignal(sigType, ctx, {
@@ -509,6 +522,7 @@ export function localSetups(ctx: EngineCtx): EngineSetup[] {
               sweepI: recentSweepBuy?.i ?? null, sweepPrice: recentSweepBuy?.price ?? null,
               pool: sellLiq[0] ? { kind: sellLiq[0].kind, touches: sellLiq[0].touches, price: sellLiq[0].price } : null,
               structEv: structEvOf(chochBear), entry, plannedRR: Number(rrOf(entry, sl, tp1).toFixed(2)),
+              pattern: patternBear ? { name: patternBear.name, factor: pfBear } : null,
             }),
           });
         }
@@ -706,7 +720,7 @@ function wrapAISetup(raw: RawSetup, ctx: EngineCtx): EngineSetup {
   };
 }
 
-export async function runAnalysis(params: AnalyzeParams, settings: Settings, log: Log): Promise<AnalysisResult> {
+export async function runAnalysis(params: AnalyzeParams, settings: Settings, log: Log, advQuality = false): Promise<AnalysisResult> {
   const t0 = performance.now();
   const htf = HTF_MAP[params.timeframe];
   const ltf = LTF_MAP[params.timeframe];
@@ -729,8 +743,9 @@ export async function runAnalysis(params: AnalyzeParams, settings: Settings, log
   const indLtf = computeIndicators(ltfC);
 
   log("detecting SMC/ICT/PA/SL-hunt levels (STF + HTF)…");
-  const smc = analyzeSMC(stfC);
-  const htfSmc = analyzeSMC(htfC);
+  const smc = analyzeSMC(stfC, advQuality);
+  const htfSmc = analyzeSMC(htfC, advQuality);
+  if (advQuality) log("adv v1.2.0 soft quality layers active (pattern ctx · AMD · dry-up · wick OB · fakeout class · IST)");
 
   const [news, sentiment] = await Promise.all([fetchNews(params.symbol, params.assetType, log), fetchSentiment(log)]);
   const trades = loadTrades();

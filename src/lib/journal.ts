@@ -25,7 +25,7 @@ export const DEFAULT_SETTINGS: Settings = {
   radarTimeframe: "15m",
   radarQualityFloor: 55,
   radarSound: false,
-  radarTmVariant: "scalp10-tm-v1.1.0",
+  radarTmVariant: "scalp10-adv-v1.2.0",
 };
 
 /** Validate + normalise the radar universe: uppercase, trim, dedupe, force USDT/USDC quote for crypto. */

@@ -57,9 +57,19 @@ export interface LiquidityPool {
   formedI: number;
 }
 
-export interface SweepEvent { i: number; t: number; side: "buy" | "sell"; price: number }
+export interface SweepEvent {
+  i: number; t: number; side: "buy" | "sell"; price: number;
+  /** adv v1.2.0 soft layers — undefined on baseline/TM variants */
+  dryUp?: boolean;                            // avg volume of the 20 candles preceding the sweep < 0.7 × VolMA20
+  fakeoutReversal?: boolean;                  // displacement close back through the level within 3 candles of the sweep
+  amdPhase?: "Manipulation" | null;           // 20-bar range (≤ 2×ATR) whose extreme was swept
+}
 export interface SRLevel { price: number; touches: number; kind: "support" | "resistance"; strength: number }
-export interface PatternHit { i: number; t: number; name: string; dir: "bull" | "bear" | "neutral" }
+export interface PatternHit {
+  i: number; t: number; name: string; dir: "bull" | "bear" | "neutral";
+  /** adv v1.2.0: 1.0 at a valid zone (≤0.5×ATR of OB/FVG edge, ≤0.3×ATR of S/R or pool) · 0.5 far away · undefined on non-adv variants */
+  locFactor?: number;
+}
 export interface BreakoutInfo { level: number; dir: "bull" | "bear"; state: "confirmed" | "unconfirmed" | "false"; volOk: boolean; closesBeyond: number }
 export interface TrendLine { x1: number; y1: number; x2: number; y2: number; kind: "support" | "resistance" }
 
@@ -123,13 +133,16 @@ export interface Reasoning {
   htfBias: Bias;
   htfRationale: string;
   liquidity: { grade: "A" | "B" | "C"; source: string; distanceAtr: number } | null;
-  sweep: { depthAtr: number; reclaim: boolean; displacementAtr: number; trapScore: number } | null;
+  sweep: { depthAtr: number; reclaim: boolean; displacementAtr: number; trapScore: number; dryUp?: boolean; fakeoutReversal?: boolean } | null;
   structureEvent: { type: "BOS" | "CHoCH"; dir: "bull" | "bear"; ts: number; level: number } | null;
   zone: { kind: string; grade: "A" | "B"; distanceAtr: number } | null;
   session: { name: string; bonus: number };
   plannedRR: number;
   entryModel: string;
   rejectionReason: string | null;
+  /** adv v1.2.0 soft layers */
+  patternCtx?: { name: string; factor: number } | null;   // pattern location quality (1.0 at level · 0.5 far)
+  amdPhase?: "Manipulation" | null;                        // accumulation/manipulation tag → +5 radar score
 }
 
 export interface TradeSetup {
@@ -242,8 +255,9 @@ export interface RadarScoreBreakdown {
   structure: number;        // /15 CHoCH 15 · BOS 12 · none 0
   zone: number;             // /10 grade A 10 · B 7 · none 0
   session: number;          // /10 LDN/NY overlap 10 · London or NY 7 · Asia 3 · off 0
-  falseBreakout: number;    // /10 confirmed breakout 10 · non-breakout neutral 6
-  total: number;            // 0–100
+  falseBreakout: number;    // /10 breakout 10 · fakeout-reversal 10 · liquidity sweep 7 · neutral 6 (adv v1.2.0)
+  amd: number;              // adv v1.2.0: +5 when AMD manipulation phase precedes the sweep
+  total: number;            // 0–100 (capped)
 }
 
 export type InvalidCheckId = "reclaim" | "mitigation" | "oppositeStructure" | "htfFlip" | "dataStale";
@@ -448,11 +462,15 @@ export interface BenchWindowReport {
   window: BenchWindowSpec;
   candles: number;
   dataSource: string;
-  segments: Record<TmMode, SegmentStats[]>; // [CAL, VAL, OOS]
+  segments: Record<TmVariantId, SegmentStats[]>; // [CAL, VAL, OOS], keyed by variant id
   checks: ThresholdCheck[];
   verdict: "PASS" | "FAIL" | "INSUFFICIENT";
   valTrades: number; // variant VAL sample size
   baselineValTrades: number;
+  /** FREQUENCY GUARD — full-run closed trades must stay ≥ max(0.8 × baseline, 50), else the variant FAILS and its soft additions are suspended */
+  freqGuard: { baselineTrades: number; advTrades: number; floor: number; pass: boolean };
+  /** convenience mirror of freqGuard.pass */
+  frequencyGuardPassed: boolean;
   elapsedMs: number;
 }
 
@@ -461,6 +479,13 @@ export interface BenchReport {
   elapsedMs: number;
   aborted: boolean;
   windows: BenchWindowReport[];
+  /**
+   * Aggregate FREQUENCY GUARD verdict for the advanced variant across all windows.
+   * true  = every window kept adv full-run trades ≥ max(0.8 × baseline, 50) → adv soft layers stay live.
+   * false = at least one window collapsed frequency → adv soft layers are REVERTED (suspended) everywhere.
+   * null  = no conclusive evidence yet (never ran, aborted, or empty) → guard pending, adv allowed.
+   */
+  advFrequencyOk: boolean | null;
 }
 
 export interface LogLine { t: number; msg: string; kind: "info" | "ok" | "warn" | "err" }

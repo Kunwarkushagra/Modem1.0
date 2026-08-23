@@ -46,7 +46,7 @@ function structureFromSwings(swings: SwingPoint[]): { events: StructureEvent[]; 
   return { events, trend };
 }
 
-function detectOrderBlocks(candles: Candle[], swings: SwingPoint[], atrArr: number[]): Zone[] {
+function detectOrderBlocks(candles: Candle[], swings: SwingPoint[], atrArr: number[], adv = false): Zone[] {
   const zones: Zone[] = [];
   const n = candles.length;
   for (const s of swings) {
@@ -54,9 +54,12 @@ function detectOrderBlocks(candles: Candle[], swings: SwingPoint[], atrArr: numb
     if (!isFinite(a) || a <= 0) continue;
     if (s.kind === "low") {
       // impulse up after swing low?
-      let maxC = -Infinity;
-      for (let j = s.i + 1; j < Math.min(s.i + 9, n); j++) maxC = Math.max(maxC, candles[j].c);
-      if (maxC - s.price < 1.8 * a) continue;
+      // adv v1.2.0: effective impulse = max(bodyImpulse on closes, wickImpulse on highs) — zone boundaries & mitigation unchanged
+      let maxC = -Infinity, maxH = -Infinity;
+      for (let j = s.i + 1; j < Math.min(s.i + 9, n); j++) { maxC = Math.max(maxC, candles[j].c); if (adv) maxH = Math.max(maxH, candles[j].h); }
+      const bodyImpulse = maxC - s.price;
+      const effective = adv ? Math.max(bodyImpulse, maxH - s.price) : bodyImpulse;
+      if (effective < 1.8 * a) continue;
       let ob = -1;
       for (let j = s.i; j >= Math.max(0, s.i - 7); j--) {
         if (candles[j].c < candles[j].o) { ob = j; break; }
@@ -65,9 +68,11 @@ function detectOrderBlocks(candles: Candle[], swings: SwingPoint[], atrArr: numb
       const c = candles[ob];
       zones.push({ kind: "bull_ob", top: Math.max(c.o, c.c), bottom: c.l, startI: ob, t: c.t, active: true, mitigated: false });
     } else {
-      let minC = Infinity;
-      for (let j = s.i + 1; j < Math.min(s.i + 9, n); j++) minC = Math.min(minC, candles[j].c);
-      if (s.price - minC < 1.8 * a) continue;
+      let minC = Infinity, minL = Infinity;
+      for (let j = s.i + 1; j < Math.min(s.i + 9, n); j++) { minC = Math.min(minC, candles[j].c); if (adv) minL = Math.min(minL, candles[j].l); }
+      const bodyImpulse = s.price - minC;
+      const effective = adv ? Math.max(bodyImpulse, s.price - minL) : bodyImpulse;
+      if (effective < 1.8 * a) continue;
       let ob = -1;
       for (let j = s.i; j >= Math.max(0, s.i - 7); j--) {
         if (candles[j].c > candles[j].o) { ob = j; break; }
@@ -280,14 +285,18 @@ function buildPD(candles: Candle[], swings: SwingPoint[], lastPrice: number): Pr
   };
 }
 
-export function analyzeSMC(candles: Candle[]): SMCAnalysis {
+/**
+ * @param adv — scalp10-adv-v1.2.0 soft quality layers. When false (baseline/TM variants)
+ * the function is byte-for-byte the v1.0.0 pipeline: same zones, same events, same pools.
+ */
+export function analyzeSMC(candles: Candle[], adv = false): SMCAnalysis {
   const atrArr = atrFn(candles, 14);
   const lastPrice = candles[candles.length - 1]?.c ?? 0;
 
   const majors = findSwings(candles, 3, true);
   const minors = findSwings(candles, 2, false).filter((m) => !majors.some((mj) => mj.i === m.i && mj.kind === m.kind));
   const { events, trend } = structureFromSwings(majors);
-  const obZones = detectOrderBlocks(candles, majors, atrArr);
+  const obZones = detectOrderBlocks(candles, majors, atrArr, adv);
   trackMitigation(candles, obZones);
   const fvgZones = detectFVG(candles, atrArr);
   const { pools, sweeps } = detectLiquidity(candles, majors, atrArr);
@@ -327,6 +336,50 @@ export function analyzeSMC(candles: Candle[]): SMCAnalysis {
   const breakouts = detectBreakouts(candles, sr, pools, volMA);
   const trendlines = buildTrendlines(candles, majors);
   const pd = buildPD(candles, majors, lastPrice);
+
+  /* ---- adv v1.2.0 SOFT quality layers (scoring/classification only — no gates) ---- */
+  if (adv) {
+    const n2 = candles.length;
+    // 1) Pattern context filter: location quality per pattern
+    const zoneEdges: number[] = [];
+    for (const z of [...obZones, ...fvgZones]) if (z.active) { zoneEdges.push(z.top); zoneEdges.push(z.bottom); }
+    for (const p of patterns) {
+      const a = atrArr[p.i];
+      if (!isFinite(a) || a <= 0) { p.locFactor = 1; continue; }
+      const close = candles[p.i].c;
+      const nearZone = zoneEdges.some((e) => Math.abs(close - e) <= 0.5 * a);
+      const nearLevel = sr.some((s) => Math.abs(close - s.price) <= 0.3 * a);
+      const nearPool = pools.some((q) => q.touches >= 2 && Math.abs(close - q.price) <= 0.3 * a);
+      p.locFactor = nearZone || nearLevel || nearPool ? 1 : 0.5;
+    }
+    // 2–4) Sweep layers: volume dry-up, fakeout-reversal class, AMD manipulation tag
+    for (const sw of sweeps) {
+      const j = sw.i;
+      const a = isFinite(atrArr[j]) && atrArr[j] > 0 ? atrArr[j] : lastPrice * 0.01;
+      // volume dry-up: avg volume of the 20 candles preceding the sweep < 0.7 × VolMA20
+      if (j >= 21) {
+        let sum = 0;
+        for (let k = j - 20; k < j; k++) sum += candles[k].v;
+        const vm = volMA[j];
+        if (isFinite(vm) && vm > 0 && sum / 20 < 0.7 * vm) sw.dryUp = true;
+      }
+      // fakeout-reversal: displacement candle (body ≥ 0.6×ATR) closing back through the swept level within the next 3 candles
+      for (let k = j + 1; k <= Math.min(j + 3, n2 - 1); k++) {
+        const c = candles[k];
+        const body = Math.abs(c.c - c.o);
+        const through = sw.side === "buy" ? c.c > sw.price : c.c < sw.price;
+        if (body >= 0.6 * a && through) { sw.fakeoutReversal = true; break; }
+      }
+      // AMD: within the last 90 candles, a 20-bar range ≤ 2×ATR whose extreme was swept
+      if (j >= n2 - 90 && j >= 20) {
+        let rH = -Infinity, rL = Infinity;
+        for (let k = j - 20; k < j; k++) { rH = Math.max(rH, candles[k].h); rL = Math.min(rL, candles[k].l); }
+        if (rH - rL <= 2 * a && (Math.abs(sw.price - rH) <= 0.5 * a || Math.abs(sw.price - rL) <= 0.5 * a)) {
+          sw.amdPhase = "Manipulation";
+        }
+      }
+    }
+  }
 
   return {
     swings: [...majors, ...minors.slice(-10)].sort((a, b) => a.i - b.i),

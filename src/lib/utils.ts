@@ -56,6 +56,29 @@ export function fmtTime(t: number, tf?: Timeframe): string {
   return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
+export function fmtIST(ts: number): string {
+  try {
+    const d = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    }).formatToParts(new Date(ts));
+    const g = (t: string) => d.find((p) => p.type === t)?.value ?? "";
+    return `${g("year")}-${g("month")}-${g("day")} ${g("hour")}:${g("minute")} IST`;
+  } catch {
+    return new Date(ts).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  }
+}
+
+export interface SessionInfo { name: "Asia" | "London" | "New York" | "Off-session"; bonus: number }
+
+export function detectSession(ts: number): SessionInfo {
+  const h = new Date(ts).getUTCHours();
+  if (h >= 0 && h < 7) return { name: "Asia", bonus: 0 };
+  if (h >= 7 && h < 12) return { name: "London", bonus: 2 };
+  if (h >= 12 && h < 21) return { name: "New York", bonus: 2 };
+  return { name: "Off-session", bonus: -2 };
+}
+
 export function fmtAgo(t: number): string {
   const s = Math.max(1, Math.floor((Date.now() - t) / 1000));
   if (s < 60) return s + "s ago";

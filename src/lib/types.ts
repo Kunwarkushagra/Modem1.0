@@ -275,6 +275,14 @@ export interface SymbolScanState {
   lastCloseEpoch: number;         // last setup-TF confirmed close processed
   lastPrice: number | null;
   error: string | null;
+  candidatesFound: number;        // candidates that cleared gates + floor on the last scan
+}
+
+/** per-stage counts so the DEBUG box shows exactly where candidates die */
+export interface ScanFunnel {
+  generated: number;              // raw setups from the engine (pre-validation)
+  passedGates: number;            // survived validators V1–V6
+  passedFloor: number;            // survived the quality floor → shown to the radar
 }
 
 export interface Trade {

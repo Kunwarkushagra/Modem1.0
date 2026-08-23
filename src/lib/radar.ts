@@ -1,6 +1,6 @@
 import type {
   AssetType, Bias, Candle, InvalidCheck, PerformanceSummary, RadarCandidate, RadarScoreBreakdown,
-  RadarTf, SymbolScanState, TradeSetup,
+  RadarTf, ScanFunnel, SymbolScanState, TradeSetup,
 } from "./types";
 import { fetchCandles } from "./marketData";
 import { computeIndicators } from "./indicators";
@@ -59,37 +59,57 @@ export interface ScanOutcome {
   state: SymbolScanState;
   candidates: RadarCandidate[];   // validated, scored, floor applied by caller
   htfBias: Bias;
+  funnel: ScanFunnel;
 }
+
+const EMPTY_FUNNEL: ScanFunnel = { generated: 0, passedGates: 0, passedFloor: 0 };
 
 export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: number): Promise<ScanOutcome> {
   const symbol = normSymbol(symbolRaw, "crypto");
   const asset: AssetType = "crypto";
-  const base: SymbolScanState = { symbol, status: "scanning", lastScanAt: Date.now(), lastCloseEpoch: 0, lastPrice: null, error: null };
+  const base: SymbolScanState = { symbol, status: "scanning", lastScanAt: Date.now(), lastCloseEpoch: 0, lastPrice: null, error: null, candidatesFound: 0 };
 
   let stf: Candle[] | null = null;
   let stale = false;
 
-  // STF with IndexedDB fallback
+  // STF with IndexedDB fallback. fetchCandles never throws — it degrades to a SIM feed,
+  // which the radar must NEVER treat as live data (and never cache).
   const stfKey = `${symbol}:${tf}`;
+  let fetchErr: string | null = null;
   try {
     const res = await fetchCandles(symbol, asset, tf, 300);
-    stf = res.candles;
-    await putCandles(stfKey, stf);
-  } catch {
+    if (res.simulated) {
+      fetchErr = "all feeds unreachable (SIM feed ignored by radar)";
+      console.warn(`[radar] ${symbol} ${tf}: ${fetchErr} — falling back to cache`);
+    } else {
+      stf = res.candles;
+      await putCandles(stfKey, stf);
+    }
+  } catch (e) {
+    fetchErr = e instanceof Error ? e.message : "fetch failed";
+    console.warn(`[radar] ${symbol} ${tf}: fetch threw — ${fetchErr}`);
+  }
+  if (!stf) {
     const cached = await getCandles(stfKey);
-    if (cached && Date.now() - cached.ts < TF_MINUTES[tf] * 60_000 * 4) { stf = cached.candles; stale = true; }
+    if (cached && cached.candles.length >= 90 && Date.now() - cached.ts < TF_MINUTES[tf] * 60_000 * 4) {
+      stf = cached.candles;
+      stale = true;
+      console.info(`[radar] ${symbol} ${tf}: using IndexedDB cache (${new Date(cached.ts).toISOString()}) — flagged DATA STALE`);
+    }
   }
   if (!stf || stf.length < 90) {
-    return { state: { ...base, status: "stale", error: "no reachable feed and no fresh cache" }, candidates: [], htfBias: "ranging" };
+    console.error(`[radar] ${symbol} ${tf}: ERROR — ${fetchErr ?? "insufficient candles"} and no usable cache`);
+    return { state: { ...base, status: "stale", error: fetchErr ?? "insufficient candles and no usable cache" }, candidates: [], htfBias: "ranging", funnel: EMPTY_FUNNEL };
   }
 
-  // HTF (best-effort; on failure reuse STF so the scan still runs, flagged if stale already)
+  // HTF (best-effort; on failure reuse STF so the scan still runs, flagged stale)
   const htfTf = HTF_MAP[tf];
   let htfC: Candle[] = stf;
   if (htfTf !== tf) {
     try {
       const res = await fetchCandles(symbol, asset, htfTf, 300);
-      htfC = res.candles;
+      if (res.simulated) stale = true;
+      else htfC = res.candles;
     } catch { stale = true; }
   }
 
@@ -112,12 +132,24 @@ export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: n
   };
 
   const candidates: RadarCandidate[] = [];
-  for (const raw of localSetups(ctx)) {
+  const funnel: ScanFunnel = { generated: 0, passedGates: 0, passedFloor: 0 };
+  const rawSetups = localSetups(ctx);
+  funnel.generated = rawSetups.length;
+  for (const raw of rawSetups) {
     const setup = validateSetup(raw, ctx);
-    if (!setup.validation.checks.every((ch) => ch.passed)) continue; // existing gates — unchanged
+    if (!setup.validation.checks.every((ch) => ch.passed)) {         // existing gates — unchanged
+      const failed = setup.validation.checks.filter((ch) => !ch.passed).map((ch) => ch.name).join(", ");
+      console.info(`[radar] ${symbol}: candidate rejected by gates — ${failed}`);
+      continue;
+    }
+    funnel.passedGates++;
     if (!setup.signal) continue;
     const score = scoreCandidate(setup, htfBias, generatedAt);
-    if (score.total < qualityFloor) continue;                        // quality floor (Settings)
+    if (score.total < qualityFloor) {                                // quality floor (Settings)
+      console.info(`[radar] ${symbol}: candidate below floor (${score.total} < ${qualityFloor})`);
+      continue;
+    }
+    funnel.passedFloor++;
     candidates.push({
       key: `${symbol}:${setup.id}`,
       symbol, assetType: asset, timeframe: tf,
@@ -132,10 +164,12 @@ export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: n
     });
   }
 
+  console.info(`[radar] ${symbol} ${tf}: generated ${funnel.generated} · gates ${funnel.passedGates} · floor ${funnel.passedFloor} · htf ${htfBias}${stale ? " · STALE" : ""}`);
   return {
-    state: { ...base, status: stale ? "stale" : "live", lastCloseEpoch: generatedAt, lastPrice: last(stfC).c },
+    state: { ...base, status: stale ? "stale" : "live", lastCloseEpoch: generatedAt, lastPrice: last(stfC).c, candidatesFound: candidates.length },
     candidates,
     htfBias,
+    funnel,
   };
 }
 

@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AssetType, Bias, RadarCandidate, RadarTf, Settings, SymbolScanState, Timeframe, Trade } from "../lib/types";
+import type { AssetType, Bias, RadarCandidate, RadarTf, ScanFunnel, Settings, SymbolScanState, Timeframe, Trade } from "../lib/types";
 import { radarBeep, revalidateCandidate, scanSymbol } from "../lib/radar";
 import { fetchLastPrice } from "../lib/marketData";
 import { loadTrades } from "../lib/journal";
 import { TM_VARIANTS, variantById } from "../lib/tmVariant";
 import { cls, fmtIST, fmtPrice, fmtTime, TF_MINUTES } from "../lib/utils";
-import { Badge, Btn, Card, ICheck, IRadar, IWarn, IX, Segmented, useToast } from "./ui";
+import { Badge, Btn, Card, ICheck, IRadar, IRefresh, IWarn, IX, Segmented, useToast } from "./ui";
 
-const blank = (symbol: string): SymbolScanState => ({ symbol, status: "idle", lastScanAt: 0, lastCloseEpoch: 0, lastPrice: null, error: null });
+const blank = (symbol: string): SymbolScanState => ({ symbol, status: "idle", lastScanAt: 0, lastCloseEpoch: 0, lastPrice: null, error: null, candidatesFound: 0 });
+const ZERO_FUNNEL: ScanFunnel = { generated: 0, passedGates: 0, passedFloor: 0 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /* ---------------- tiny pieces ---------------- */
@@ -239,12 +240,16 @@ export function RadarView(props: {
   const [candidates, setCandidates] = useState<RadarCandidate[]>([]);
   const [pending, setPending] = useState<Trade[]>([]);
   const [now, setNow] = useState(() => Date.now());
+  const [funnels, setFunnels] = useState<Record<string, ScanFunnel>>({});
+  const [lastFullScanAt, setLastFullScanAt] = useState<number | null>(null);
+  const [manualScanning, setManualScanning] = useState(false);
 
   const universeRef = useRef(universe); universeRef.current = universe;
   const candidatesRef = useRef(candidates); candidatesRef.current = candidates;
   const htfRef = useRef<Record<string, Bias>>({});
   const prevTopRef = useRef<string[]>([]);
-  const initializedRef = useRef(false);
+  const firstRender = useRef(true);
+  const scanningRef = useRef(false);
 
   /* 1s clock: countdowns + time-based expiry */
   useEffect(() => {
@@ -274,28 +279,54 @@ export function RadarView(props: {
     return [...kept, ...replaced, ...fresh].slice(-80);
   }, []);
 
-  /* scanner loop — on every setup-TF confirmed close, per symbol, non-blocking */
+  /* one symbol scan — shared by the loop and SCAN NOW; never throws, always surfaces state */
+  const scanOne = useCallback(async (sym: string, tfNow: RadarTf, floorNow: number): Promise<boolean> => {
+    setUniverse((u) => ({ ...u, [sym]: { ...(u[sym] ?? blank(sym)), status: "scanning" } }));
+    try {
+      const res = await scanSymbol(sym, tfNow, floorNow);
+      htfRef.current[sym] = res.htfBias;
+      setUniverse((u) => ({ ...u, [sym]: res.state }));
+      setFunnels((f) => ({ ...f, [sym]: res.funnel }));
+      setCandidates((prev) => mergeCandidates(prev, sym, res.candidates));
+      return true;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "scan failed";
+      console.error(`[radar] ${sym} ${tfNow}: scan threw —`, e);
+      setUniverse((u) => ({ ...u, [sym]: { ...(u[sym] ?? blank(sym)), status: "stale", error: msg } }));
+      return false;
+    }
+  }, [mergeCandidates]);
+
+  /* SCAN NOW — full immediate pass on confirmed candles (no waiting for the next close) */
+  const scanNow = useCallback(async () => {
+    if (scanningRef.current) return;
+    scanningRef.current = true;
+    setManualScanning(true);
+    let ok = 0;
+    for (const sym of symbols) {
+      if (await scanOne(sym, tf, floor)) ok++;
+      await sleep(120);
+    }
+    setLastFullScanAt(Date.now());
+    scanningRef.current = false;
+    setManualScanning(false);
+    const activeN = candidatesRef.current.filter((c) => c.status === "active").length;
+    toast.push("ok", `Manual scan complete · ${ok}/${symbols.length} symbols OK · ${activeN} active candidate${activeN === 1 ? "" : "s"}`);
+  }, [symbols, tf, floor, scanOne, toast]);
+
+  /* scanner loop — immediate pass on mount, then re-scan each symbol when a new setup-TF confirmed close lands */
   useEffect(() => {
     let cancelled = false;
     firstRender.current = true;
     setUniverse(Object.fromEntries(symbols.map((s) => [s, universeRef.current[s] ?? blank(s)])) as Record<string, SymbolScanState>);
 
-    const doScan = async (sym: string) => {
-      if (cancelled) return;
-      setUniverse((u) => ({ ...u, [sym]: { ...(u[sym] ?? blank(sym)), status: "scanning" } }));
-      try {
-        const res = await scanSymbol(sym, tf, floor);
-        if (cancelled) return;
-        htfRef.current[sym] = res.htfBias;
-        setUniverse((u) => ({ ...u, [sym]: res.state }));
-        setCandidates((prev) => mergeCandidates(prev, sym, res.candidates));
-      } catch {
-        if (!cancelled) setUniverse((u) => ({ ...u, [sym]: { ...(u[sym] ?? blank(sym)), status: "stale", error: "scan failed" } }));
-      }
-    };
-
     (async () => {
-      for (const sym of symbols) { await doScan(sym); await sleep(160); }
+      for (const sym of symbols) {
+        if (cancelled) return;
+        await scanOne(sym, tf, floor);
+        await sleep(160);
+      }
+      if (!cancelled) setLastFullScanAt(Date.now());
     })();
 
     const t = setInterval(() => {
@@ -303,13 +334,13 @@ export function RadarView(props: {
       for (const sym of symbols) {
         const st = universeRef.current[sym];
         if (!st || st.status === "scanning") continue;
-        if (epoch > st.lastCloseEpoch) void doScan(sym);
+        if (epoch > st.lastCloseEpoch) void scanOne(sym, tf, floor);
       }
     }, 3000);
 
     return () => { cancelled = true; clearInterval(t); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbols.join("|"), tf, floor]);
+  }, [symbols.join("|"), tf, floor, scanOne]);
 
   /* lightweight re-validation every 5s: price vs INVALID-IF checklist + journal sync */
   useEffect(() => {
@@ -361,6 +392,25 @@ export function RadarView(props: {
   const anyScanning = Object.values(universe).some((u) => u.status === "scanning");
   const nextScanS = Math.max(0, Math.ceil((stepMs - (now % stepMs)) / 1000));
   const inTradeFor = (c: RadarCandidate) => pending.some((t) => t.symbol === c.symbol && t.direction === c.setup.direction);
+  const activeCount = active.length;
+
+  /* DEBUG funnel aggregates — where candidates die */
+  const agg = useMemo(() => {
+    const g = Object.values(funnels).reduce((a, f) => ({ generated: a.generated + f.generated, passedGates: a.passedGates + f.passedGates, passedFloor: a.passedFloor + f.passedFloor }), { ...ZERO_FUNNEL });
+    return {
+      ...g,
+      expired: candidates.filter((c) => c.status === "expired").length,
+      invalidated: candidates.filter((c) => c.status === "invalidated").length,
+      shown: top.length,
+    };
+  }, [funnels, candidates, top]);
+
+  const chipFor = (u: SymbolScanState | undefined): { label: string; tone: "bull" | "bear" | "warn" | "dim" | "gold" } => {
+    if (!u || u.status === "idle") return { label: "IDLE", tone: "dim" };
+    if (u.status === "scanning") return { label: "SCANNING", tone: "gold" };
+    if (u.status === "stale") return u.error ? { label: "ERROR", tone: "bear" } : { label: "DATA STALE", tone: "warn" };
+    return u.candidatesFound > 0 ? { label: `OK · ${u.candidatesFound}`, tone: "bull" } : { label: "NO CANDIDATE", tone: "dim" };
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -391,30 +441,66 @@ export function RadarView(props: {
             settings.radarSound ? "border-bull-600 bg-bull-500/12 text-bull-400" : "border-ink-600 text-fog-400 hover:text-fog-200")}>
           SOUND {settings.radarSound ? "ON" : "OFF"}
         </button>
+        <Btn variant="primary" size="sm" onClick={() => void scanNow()} disabled={manualScanning}>
+          {manualScanning ? <span className="tv-blink">SCANNING…</span> : <><IRefresh size={13} /> SCAN NOW</>}
+        </Btn>
         <div className="ml-auto flex items-center gap-3 font-mono text-[10px] tracking-wider text-fog-400">
           <Badge tone="dim">FLOOR {floor} · SETTINGS</Badge>
+          <span className="text-fog-500">{lastFullScanAt ? `LAST SCAN ${fmtIST(lastFullScanAt)}` : "NEVER SCANNED"}</span>
           <span className={cls(anyScanning && "tv-blink text-gold-300")}>{anyScanning ? "SCANNING…" : `NEXT CLOSE IN ${Math.floor(nextScanS / 60)}:${String(nextScanS % 60).padStart(2, "0")}`}</span>
         </div>
       </div>
 
-      {/* universe strip */}
+      {/* visible status line */}
+      <div className="tv-panel flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 font-mono text-[10.5px] tracking-wider">
+        <span className="flex items-center gap-1.5 text-fog-300">
+          <span className={cls("tv-live-dot inline-block h-1.5 w-1.5 rounded-full", anyScanning ? "bg-gold-400" : "bg-bull-500")} />
+          SCANNING {symbols.length} SYMBOLS
+        </span>
+        <span className="text-fog-400">TF {tf.toUpperCase()}</span>
+        <span className="text-fog-400">FLOOR {floor}</span>
+        <span className={cls("font-bold", activeCount > 0 ? "text-gold-300" : "text-fog-500")}>CANDIDATES FOUND: {activeCount}</span>
+        <span className="ml-auto text-fog-500">CONFIRMED-CANDLES ONLY · SHARED LIVE ENGINE</span>
+      </div>
+
+      {/* universe strip — per-symbol status */}
       <div className={cls("tv-panel flex flex-wrap items-center gap-2 px-3 py-2", anyScanning && "tv-scanbar")}>
         <span className="font-mono text-[9px] tracking-[0.2em] text-fog-500">UNIVERSE</span>
         {symbols.map((sym) => {
           const u = universe[sym];
+          const chip = chipFor(u);
           const dot = u?.status === "live" ? "bg-bull-500" : u?.status === "scanning" ? "bg-gold-400 tv-blink" : u?.status === "stale" ? "bg-bear-500" : "bg-ink-400";
           return (
             <span key={sym} className={cls("flex items-center gap-1.5 rounded border px-2 py-1 font-mono text-[10px]",
               u?.status === "stale" ? "border-bear-600/50 text-bear-300" : "border-ink-600 text-fog-300")}
-              title={u?.error ?? `last scan ${u?.lastScanAt ? new Date(u.lastScanAt).toLocaleTimeString() : "—"}`}>
+              title={`${u?.error ? "ERROR: " + u.error + " · " : ""}last scan ${u?.lastScanAt ? fmtIST(u.lastScanAt) : "—"}`}>
               <span className={cls("tv-live-dot inline-block h-1.5 w-1.5 rounded-full", dot)} />
               <span className="font-bold tracking-wider">{sym}</span>
               <span className="text-fog-500">{u?.lastPrice != null ? fmtPrice(u.lastPrice, "crypto") : "—"}</span>
-              {u?.status === "stale" && <Badge tone="warn" className="text-[8px]">DATA STALE</Badge>}
+              <Badge tone={chip.tone} className="text-[8px]">{chip.label}</Badge>
             </span>
           );
         })}
       </div>
+
+      {/* DEBUG box — per-stage counts: where candidates die */}
+      <details className="tv-panel px-4 py-2.5" open>
+        <summary className="cursor-pointer select-none font-mono text-[10px] font-bold tracking-[0.2em] text-fog-400 hover:text-fog-200">
+          DEBUG · PIPELINE FUNNEL (LAST SCAN PASS)
+        </summary>
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[10.5px] tracking-wider">
+          <span className="text-fog-400">GENERATED <b className="text-fog-100">{agg.generated}</b></span>
+          <span className="text-fog-500">→</span>
+          <span className="text-fog-400">PASSED GATES V1–V6 <b className="text-info-400">{agg.passedGates}</b></span>
+          <span className="text-fog-500">→</span>
+          <span className="text-fog-400">PASSED FLOOR {floor} <b className="text-gold-300">{agg.passedFloor}</b></span>
+          <span className="mx-1 hidden h-4 w-px bg-ink-500 sm:block" />
+          <span className="text-fog-400">EXPIRED <b className="text-fog-200">{agg.expired}</b></span>
+          <span className="text-fog-400">INVALIDATED <b className="text-bear-400">{agg.invalidated}</b></span>
+          <span className="text-fog-400">SHOWN <b className="text-bull-400">{agg.shown}</b></span>
+          <span className="ml-auto text-fog-500">per-symbol detail in browser console · [radar] prefix</span>
+        </div>
+      </details>
 
       {/* top candidates */}
       {top.length > 0 ? (
@@ -424,13 +510,21 @@ export function RadarView(props: {
           ))}
         </div>
       ) : (
-        <div className="tv-panel flex flex-col items-center gap-2 px-6 py-14 text-center">
-          <IRadar size={30} className="text-fog-500" />
+        <div className="tv-panel relative flex flex-col items-center gap-3 overflow-hidden px-6 py-14 text-center">
+          <div className={cls("absolute inset-x-0 top-0 h-px", anyScanning && "tv-scanbar")} />
+          <IRadar size={34} className={cls("text-fog-500", anyScanning && "tv-blink text-gold-500")} />
+          <p className="font-display text-lg font-extrabold tracking-tight text-fog-200">NO LIVE SETUPS — MARKET QUIET</p>
           <p className="max-w-lg text-sm leading-relaxed text-fog-400">
-            No candidate currently clears the existing gates <span className="text-fog-200">and</span> the quality floor ({floor}).
-            The radar re-runs the full confirmed-candle pipeline for every symbol on each {tf} close — standing aside is the default state.
+            Zero candidates cleared the existing gates <span className="text-fog-200">and</span> the quality floor ({floor}) on the last scan pass.
+            The radar re-runs the full confirmed-candle pipeline for all {symbols.length} symbols on each {tf.toUpperCase()} close — standing aside is the default state, not a fault.
           </p>
-          <p className="font-mono text-[10px] tracking-widest text-fog-500">NEXT SCAN AT THE NEXT {tf.toUpperCase()} CLOSE</p>
+          <div className="flex flex-wrap items-center justify-center gap-2 font-mono text-[10px] tracking-widest text-fog-500">
+            <span>{lastFullScanAt ? `LAST SCAN ${fmtIST(lastFullScanAt)}` : "FIRST SCAN RUNNING"}</span>
+            <span>·</span>
+            <span>NEXT CLOSE IN {Math.floor(nextScanS / 60)}:{String(nextScanS % 60).padStart(2, "0")}</span>
+            <span>·</span>
+            <button type="button" onClick={() => void scanNow()} className="tv-btn font-bold text-gold-400 hover:text-gold-300">RE-SCAN NOW ↻</button>
+          </div>
         </div>
       )}
 

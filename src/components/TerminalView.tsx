@@ -3,6 +3,7 @@ import type { AnalysisResult, AssetType, LogLine, Settings, Timeframe, TradeSetu
 import { runAnalysis, signalStatus } from "../lib/ai";
 import { fetchLastPrice } from "../lib/marketData";
 import { addAlert, addTrade, loadAlerts, markAlertTriggered } from "../lib/journal";
+import { loadFrequencyGate, variantById } from "../lib/tmVariant";
 import { fmtAgo, fmtIST, fmtMoney, fmtPrice, fmtTime, normSymbol, TF_LIST, cls } from "../lib/utils";
 import { CandleChart } from "./CandleChart";
 import { Badge, BiasPill, Btn, Card, IBell, IBrain, ICandles, ICheck, IClock, IDown, IExt, IFlask, ILayers, INews, IPlay, IRadar, ITarget, IUp, IWarn, IX, IZap, Meter, PctCell, Segmented, SparkLine, Stat, useToast } from "./ui";
@@ -98,10 +99,15 @@ export function TerminalView(props: {
     setError(null);
     if (!silent) setLogs([]);
     try {
+      // FREQUENCY GUARD: adv v1.2.0 soft layers are reverted when the last conclusive
+      // benchmark failed max(0.8 × baseline, 50) full-run trades in any window.
+      const advGate = loadFrequencyGate();
+      const advActive = variantById(settings.radarTmVariant).advQuality && advGate.ok !== false;
       const res = await runAnalysis(
         { symbol: normSymbol(symbolInput, assetType), assetType, timeframe, accountSize: settings.accountSize, riskPercent: settings.riskPercent },
         settings,
         (msg, kind) => { if (runIdRef.current === id) pushLog(msg, kind ?? "info"); },
+        advActive,
       );
       if (runIdRef.current !== id) return;
       setResult(res);

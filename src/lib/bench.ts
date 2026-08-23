@@ -180,13 +180,26 @@ async function runBenchWindow(
     valTrades: vVal.trades,
     baselineValTrades: bVal.trades,
     freqGuard,
+    frequencyGuardPassed: guardPass,
     elapsedMs: performance.now() - t0,
   };
 }
 
 /**
- * Full benchmark: 4 windows × 2 variants, identical candles per window,
- * chronological 60/20/20 (CAL/VAL/OOS, OOS touched once), thresholds on VAL.
+ * Aggregate FREQUENCY GUARD verdict from the windows completed so far.
+ * null while there is no conclusive evidence (aborted run or zero windows).
+ */
+export function computeAdvFrequencyOk(report: Pick<BenchReport, "aborted" | "windows">): boolean | null {
+  if (report.aborted || report.windows.length === 0) return null;
+  return report.windows.every((w) => w.frequencyGuardPassed);
+}
+
+/**
+ * Full benchmark: 4 windows × 3 variants, identical candles per window,
+ * chronological 60/20/20 (CAL/VAL/OOS, OOS touched once), thresholds on VAL,
+ * plus the FREQUENCY GUARD (adv full-run trades ≥ max(0.8 × baseline, 50)).
+ * A guard failure marks the advanced variant FAIL and — via loadFrequencyGate() —
+ * suspends its soft additions in live signal generation until a passing run is stored.
  */
 export async function runBenchmark(
   log: Log,
@@ -195,12 +208,13 @@ export async function runBenchmark(
   isAborted?: () => boolean,
 ): Promise<BenchReport> {
   const t0 = performance.now();
-  const report: BenchReport = { ranAt: Date.now(), elapsedMs: 0, aborted: false, windows: [] };
+  const report: BenchReport = { ranAt: Date.now(), elapsedMs: 0, aborted: false, windows: [], advFrequencyOk: null };
   for (let wi = 0; wi < BENCH_WINDOWS.length; wi++) {
     if (isAborted?.()) { report.aborted = true; break; }
     try {
       const wr = await runBenchWindow(BENCH_WINDOWS[wi], log, (p) => onRunProgress?.(wi, p));
       report.windows.push(wr);
+      report.advFrequencyOk = computeAdvFrequencyOk(report);
       saveBenchReport(report);
       onWindow(wr, wi);
     } catch (e) {
@@ -209,8 +223,14 @@ export async function runBenchmark(
       break;
     }
   }
+  report.advFrequencyOk = computeAdvFrequencyOk(report);
   report.elapsedMs = performance.now() - t0;
   report.ranAt = Date.now();
   saveBenchReport(report);
+  if (report.advFrequencyOk === false) {
+    log("FREQUENCY GUARD FAILED — scalp10-adv-v1.2.0 soft layers are REVERTED in live scanning until a passing benchmark", "err");
+  } else if (report.advFrequencyOk === true) {
+    log("FREQUENCY GUARD PASSED — adv v1.2.0 soft layers remain live", "ok");
+  }
   return report;
 }

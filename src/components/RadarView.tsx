@@ -3,7 +3,7 @@ import type { AssetType, Bias, RadarCandidate, RadarTf, ScanFunnel, Settings, Sy
 import { radarBeep, revalidateCandidate, scanSymbol } from "../lib/radar";
 import { fetchLastPrice } from "../lib/marketData";
 import { loadTrades } from "../lib/journal";
-import { TM_VARIANTS, variantById } from "../lib/tmVariant";
+import { loadFrequencyGate, TM_VARIANTS, variantById } from "../lib/tmVariant";
 import { cls, fmtIST, fmtPrice, fmtTime, TF_MINUTES } from "../lib/utils";
 import { Badge, Btn, Card, ICheck, IRadar, IRefresh, IWarn, IX, Segmented, useToast } from "./ui";
 
@@ -283,7 +283,11 @@ export function RadarView(props: {
   const scanOne = useCallback(async (sym: string, tfNow: RadarTf, floorNow: number): Promise<boolean> => {
     setUniverse((u) => ({ ...u, [sym]: { ...(u[sym] ?? blank(sym)), status: "scanning" } }));
     try {
-      const res = await scanSymbol(sym, tfNow, floorNow);
+      // FREQUENCY GUARD: adv v1.2.0 soft layers are reverted (run without them) when the last
+      // conclusive benchmark failed max(0.8 × baseline, 50) full-run trades in any window.
+      const gate = loadFrequencyGate();
+      const advActive = variantById(settings.radarTmVariant).advQuality && gate.ok !== false;
+      const res = await scanSymbol(sym, tfNow, floorNow, advActive);
       htfRef.current[sym] = res.htfBias;
       setUniverse((u) => ({ ...u, [sym]: res.state }));
       setFunnels((f) => ({ ...f, [sym]: res.funnel }));
@@ -295,7 +299,8 @@ export function RadarView(props: {
       setUniverse((u) => ({ ...u, [sym]: { ...(u[sym] ?? blank(sym)), status: "stale", error: msg } }));
       return false;
     }
-  }, [mergeCandidates]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mergeCandidates, settings.radarTmVariant]);
 
   /* SCAN NOW — full immediate pass on confirmed candles (no waiting for the next close) */
   const scanNow = useCallback(async () => {
@@ -436,6 +441,16 @@ export function RadarView(props: {
             </button>
           ))}
         </div>
+        {(() => {
+          const adv = variantById(settings.radarTmVariant);
+          if (!adv.advQuality) return null;
+          const gate = loadFrequencyGate();
+          if (gate.ok === false)
+            return <span title={gate.detail}><Badge tone="bear" className="tv-blink">FREQ GUARD · ADV REVERTED</Badge></span>;
+          if (gate.ok === true)
+            return <span title={gate.detail}><Badge tone="bull">FREQ GUARD · PASS</Badge></span>;
+          return <span title={gate.detail}><Badge tone="warn">FREQ GUARD · PENDING</Badge></span>;
+        })()}
         <button type="button" onClick={() => props.onSettingsChange({ radarSound: !settings.radarSound })}
           className={cls("tv-btn rounded border px-2 py-1 font-mono text-[9.5px] font-bold tracking-wider",
             settings.radarSound ? "border-bull-600 bg-bull-500/12 text-bull-400" : "border-ink-600 text-fog-400 hover:text-fog-200")}>

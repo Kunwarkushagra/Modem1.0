@@ -469,6 +469,8 @@ export interface BenchWindowReport {
   baselineValTrades: number;
   /** FREQUENCY GUARD — full-run closed trades must stay ≥ max(0.8 × baseline, 50), else the variant FAILS and its soft additions are suspended */
   freqGuard: { baselineTrades: number; advTrades: number; floor: number; pass: boolean };
+  /** convenience mirror of freqGuard.pass */
+  frequencyGuardPassed: boolean;
   elapsedMs: number;
 }
 
@@ -477,6 +479,13 @@ export interface BenchReport {
   elapsedMs: number;
   aborted: boolean;
   windows: BenchWindowReport[];
+  /**
+   * Aggregate FREQUENCY GUARD verdict for the advanced variant across all windows.
+   * true  = every window kept adv full-run trades ≥ max(0.8 × baseline, 50) → adv soft layers stay live.
+   * false = at least one window collapsed frequency → adv soft layers are REVERTED (suspended) everywhere.
+   * null  = no conclusive evidence yet (never ran, aborted, or empty) → guard pending, adv allowed.
+   */
+  advFrequencyOk: boolean | null;
 }
 
 export interface LogLine { t: number; msg: string; kind: "info" | "ok" | "warn" | "err" }

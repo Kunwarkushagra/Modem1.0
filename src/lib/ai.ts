@@ -1,6 +1,6 @@
 import type {
   AnalysisResult, AnalyzeParams, Bias, Candle, IndicatorSet, KeyLevel, PerformanceSummary,
-  PositionSizing, Settings, SMCAnalysis, Timeframe, TradeSetup, ValidationCheck,
+  PositionSizing, Reasoning, Settings, SignalInfo, SignalType, SMCAnalysis, StructureEvent, Timeframe, TradeSetup, ValidationCheck,
 } from "./types";
 import { fetchCandles } from "./marketData";
 import { computeIndicators } from "./indicators";
@@ -8,7 +8,7 @@ import { analyzeSMC } from "./smc";
 import { fetchNews, fetchSentiment } from "./news";
 import { computePerformance, performancePromptBlock } from "./performance";
 import { loadTrades } from "./journal";
-import { fmtPrice, HTF_MAP, last, lastValid, LTF_MAP, uid } from "./utils";
+import { detectSession, fmtIST, fmtPrice, HTF_MAP, last, lastValid, LTF_MAP, TF_MINUTES, uid } from "./utils";
 
 type Log = (msg: string, kind?: "info" | "ok" | "warn" | "err") => void;
 
@@ -28,12 +28,20 @@ export interface RawSetup {
   isBreakout?: boolean;
 }
 
+export interface EngineSetup extends RawSetup {
+  reasoning: Reasoning;
+  signal: SignalInfo;
+}
+
 interface AIEnvelope {
   htf_bias?: Bias; stf_bias?: Bias; ltf_bias?: Bias;
   summary?: string; self_learning_note?: string; news_summary?: string;
   key_levels?: KeyLevel[]; liquidity_pools?: Array<{ side: "buy" | "sell"; price: number }>;
   setups?: RawSetup[];
 }
+
+/** SCALP-1.0 validity windows, in setup-timeframe candles */
+export const VALID_CANDLES: Record<SignalType, number> = { sweep: 15, zone: 30, structure: 45 };
 
 /* ---------------- bias derivation ---------------- */
 
@@ -53,6 +61,21 @@ export function deriveBias(smc: SMCAnalysis, ind: IndicatorSet, candles: Candle[
   if (score >= 2) return "bullish";
   if (score <= -2) return "bearish";
   return "ranging";
+}
+
+export function biasRationale(smc: SMCAnalysis, ind: IndicatorSet, candles: Candle[]): string {
+  const parts: string[] = [];
+  parts.push(`trend=${smc.trend}`);
+  const e50 = lastValid(ind.ema50), e200 = lastValid(ind.ema200), r = lastValid(ind.rsi);
+  const hist = lastValid(ind.macdHist), vw = lastValid(ind.vwap);
+  const price = last(candles)?.c ?? 0;
+  if (isFinite(e50) && isFinite(e200)) parts.push(e50 > e200 ? "EMA50>EMA200" : "EMA50<EMA200");
+  if (isFinite(hist)) parts.push(hist > 0 ? "MACD hist>0" : "MACD hist<0");
+  if (isFinite(r)) parts.push(`RSI ${r.toFixed(0)}`);
+  if (isFinite(vw) && price) parts.push(price > vw ? "close>VWAP" : "close<VWAP");
+  const ev = smc.structure.slice(-1)[0];
+  if (ev) parts.push(`last ${ev.type} ${ev.dir}`);
+  return `${deriveBias(smc, ind, candles)} — ${parts.join(", ")}`;
 }
 
 /* ---------------- exact analysis prompt ---------------- */
@@ -263,9 +286,13 @@ export interface EngineCtx {
   ind: IndicatorSet;
   smc: SMCAnalysis;
   htfSmc: SMCAnalysis;
+  htfInd: IndicatorSet;
+  htfCandles: Candle[];
   htfBias: Bias;
   perf: PerformanceSummary;
   newsCount: number;
+  generatedAt: number;  // UTC ms of confirming candle close
+  stepMs: number;
 }
 
 function rrOf(e: number, sl: number, tp: number): number {
@@ -273,13 +300,83 @@ function rrOf(e: number, sl: number, tp: number): number {
   return risk > 0 ? Math.abs(tp - e) / risk : 0;
 }
 
-export function localSetups(ctx: EngineCtx): RawSetup[] {
+function makeSignal(type: SignalType, ctx: EngineCtx, o: { reclaimLevel: number | null; zoneTop?: number | null; zoneBottom?: number | null }): SignalInfo {
+  const validCandles = VALID_CANDLES[type];
+  const validTillTs = ctx.generatedAt + validCandles * ctx.stepMs;
+  const rules =
+    type === "sweep"
+      ? "EXPIRES: sweep level reclaimed against direction · 15 setup-candles"
+      : type === "zone"
+        ? "EXPIRES: zone fully mitigated · touched twice pre-trigger · 30 setup-candles"
+        : "EXPIRES: opposite BOS/CHoCH · level reclaimed · 45 setup-candles";
+  return {
+    type,
+    generatedAt: ctx.generatedAt,
+    displayTimeIST: fmtIST(ctx.generatedAt),
+    validCandles,
+    validTillTs,
+    stepMs: ctx.stepMs,
+    reclaimLevel: o.reclaimLevel,
+    zoneTop: o.zoneTop ?? null,
+    zoneBottom: o.zoneBottom ?? null,
+    expiryRules: rules,
+  };
+}
+
+const ENTRY_MODEL = "Execution: confirmed candles only. Backtest fills at NEXT candle OPEN after the trigger candle closes (SL/TP shifted by fill delta). Live paper: limit order at the level.";
+
+function gradeLiquidity(touches: number): "A" | "B" | "C" { return touches >= 3 ? "A" : touches === 2 ? "B" : "C"; }
+
+function buildReasoning(
+  ctx: EngineCtx,
+  direction: "Long" | "Short",
+  o: { zone?: { kind: string; top: number; bottom: number; startI: number; mitigated: boolean } | null; sweepI?: number | null; sweepPrice?: number | null; pool?: { kind: string; touches: number; price: number } | null; structEv?: { type: "BOS" | "CHoCH"; dir: "bull" | "bear"; ts: number; level: number } | null; entry: number; plannedRR: number; isBreakout?: boolean },
+): Reasoning {
+  const atrV = lastValid(ctx.ind.atr) || 1;
+  const session = detectSession(ctx.generatedAt);
+  const sweep = (() => {
+    if (o.sweepI == null || o.sweepPrice == null) return null;
+    const sc = ctx.candles[o.sweepI];
+    if (!sc) return null;
+    const depthAtr = Number((Math.abs(o.sweepPrice - (direction === "Long" ? sc.l : sc.h)) / atrV).toFixed(2));
+    const reclaim = direction === "Long" ? sc.c > o.sweepPrice : sc.c < o.sweepPrice;
+    let disp = 0;
+    for (let j = o.sweepI + 1; j <= Math.min(o.sweepI + 3, ctx.candles.length - 1); j++) {
+      disp = Math.max(disp, Math.abs(ctx.candles[j].c - ctx.candles[j].o));
+    }
+    const displacementAtr = Number((disp / atrV).toFixed(2));
+    const trapScore = Math.round(Math.min(100, 40 * Math.min(1, depthAtr / 0.8) + 30 * (reclaim ? 1 : 0.2) + 30 * Math.min(1, displacementAtr / 1.2)));
+    return { depthAtr, reclaim, displacementAtr, trapScore };
+  })();
+  const zone = (() => {
+    if (!o.zone) return null;
+    const age = ctx.candles.length - 1 - o.zone.startI;
+    const grade: "A" | "B" = !o.zone.mitigated && age <= 40 ? "A" : "B";
+    const mid = (o.zone.top + o.zone.bottom) / 2;
+    return { kind: o.zone.kind, grade, distanceAtr: Number((Math.abs(o.entry - mid) / atrV).toFixed(2)) };
+  })();
+  const liquidity = o.pool
+    ? { grade: gradeLiquidity(o.pool.touches), source: `${o.pool.kind.replace("_", " ")} ×${o.pool.touches}`, distanceAtr: Number((Math.abs(o.pool.price - o.entry) / atrV).toFixed(2)) }
+    : null;
+  return {
+    htfBias: ctx.htfBias,
+    htfRationale: biasRationale(ctx.htfSmc, ctx.htfInd, ctx.htfCandles),
+    liquidity, sweep,
+    structureEvent: o.structEv ?? null,
+    zone, session,
+    plannedRR: o.plannedRR,
+    entryModel: ENTRY_MODEL,
+    rejectionReason: null,
+  };
+}
+
+export function localSetups(ctx: EngineCtx): EngineSetup[] {
   const { candles, ind, smc, params } = ctx;
   const n = candles.length;
   const price = last(candles).c;
   const atrV = lastValid(ind.atr);
   if (!isFinite(atrV) || atrV <= 0) return [];
-  const out: RawSetup[] = [];
+  const out: EngineSetup[] = [];
   const htfAlignBull = ctx.htfBias === "bullish" || smc.trend === "bull";
   const htfAlignBear = ctx.htfBias === "bearish" || smc.trend === "bear";
   const recentSweepSell = smc.sweeps.filter((s) => s.side === "sell" && s.i >= n - 8).slice(-1)[0];
@@ -293,6 +390,8 @@ export function localSetups(ctx: EngineCtx): RawSetup[] {
   const breakoutBull = smc.breakouts.filter((b) => b.dir === "bull" && b.state === "confirmed").slice(-1)[0];
   const breakoutBear = smc.breakouts.filter((b) => b.dir === "bear" && b.state === "confirmed").slice(-1)[0];
   const volAbove = isFinite(lastValid(ind.volMA)) && last(candles).v > lastValid(ind.volMA);
+  const lastStruct = smc.structure.slice(-1)[0] ?? null;
+  const session = detectSession(ctx.generatedAt);
 
   const bullZones = smc.zones.filter((z) => (z.kind === "bull_ob" || z.kind === "bull_fvg" || z.kind === "breaker_bull") && z.active && z.top <= price + 0.35 * atrV && z.bottom >= price - 2.6 * atrV).sort((a, b) => b.top - a.top);
   const bearZones = smc.zones.filter((z) => (z.kind === "bear_ob" || z.kind === "bear_fvg" || z.kind === "breaker_bear") && z.active && z.bottom >= price - 0.35 * atrV && z.top <= price + 2.6 * atrV).sort((a, b) => a.bottom - b.bottom);
@@ -306,11 +405,13 @@ export function localSetups(ctx: EngineCtx): RawSetup[] {
     if (ctx.perf.recent.tilt) w -= 6;
     if (ctx.perf.bestConfluences.some((b) => conf.includes(b.confluence))) w += 4;
     if (ctx.perf.worstConfluences.some((b) => conf.includes(b.confluence))) w -= 7;
+    w += session.bonus;
     return Math.max(55, Math.min(88, Math.round(w)));
   };
 
   const newsNote = ctx.newsCount > 0 ? "Macro headlines in feed — check calendar for high-impact releases before entry; reduce size into news." : null;
   const riskNote = `Risk ${params.riskPercent}% of $${params.accountSize.toLocaleString()} = $${((params.accountSize * params.riskPercent) / 100).toFixed(2)}. Size so SL distance equals this amount; never widen SL.`;
+  const structEvOf = (e: StructureEvent | null | undefined) => (e ? { type: e.type, dir: e.dir, ts: e.t, level: e.level } : lastStruct ? { type: lastStruct.type, dir: lastStruct.dir, ts: lastStruct.t, level: lastStruct.level } : null);
 
   // ---- LONG: sweep + discount + bullish zone ----
   if ((recentSweepSell || inDiscount) && bullZones.length) {
@@ -334,13 +435,27 @@ export function localSetups(ctx: EngineCtx): RawSetup[] {
         let tp2 = buyLiq[1]?.price ?? smc.pd.rangeHigh;
         if (tp2 - entry < 2.8 * risk) tp2 = entry + 3.2 * risk;
         const est = boost(conf);
-        if (est >= 60) out.push({
-          direction: "Long", entry_price: entry, stop_loss: sl, take_profit1: tp1, take_profit2: tp2,
-          estimated_win_rate_percent: est, confidence_score_0_100: Math.min(92, est + (htfAlignBull ? 3 : 0)),
-          invalidation_level: slBase - 0.6 * atrV,
-          trade_rationale: `${recentSweepSell ? `Sell-side liquidity at ${fmtPrice(recentSweepSell.price, params.assetType)} was swept ${n - recentSweepSell.i} candles ago (SL hunt), ` : `Price is in the discount leg of the dealing range (${smc.pd.position}), `}then tapped the active ${z.kind === "bull_fvg" ? "bullish FVG" : z.kind === "breaker_bull" ? "bullish breaker" : "bullish order block"} [${fmtPrice(z.bottom, params.assetType)}–${fmtPrice(z.top, params.assetType)}]. ${chochBull ? `${chochBull.type} bullish confirmed at ${fmtPrice(chochBull.level, params.assetType)}. ` : ""}${patternBull ? `${patternBull.name} printed at the level. ` : ""}HTF bias ${ctx.htfBias}. Invalidation below the ${recentSweepSell ? "sweep low" : "block"} — a close there voids the premise.`.trim(),
-          confluences: conf, news_caution: newsNote, risk_management_note: riskNote,
-        });
+        if (est >= 60) {
+          const sigType: SignalType = recentSweepSell ? "sweep" : "zone";
+          const signal = makeSignal(sigType, ctx, {
+            reclaimLevel: recentSweepSell ? recentSweepSell.price : z.bottom,
+            zoneTop: z.top, zoneBottom: z.bottom,
+          });
+          out.push({
+            direction: "Long", entry_price: entry, stop_loss: sl, take_profit1: tp1, take_profit2: tp2,
+            estimated_win_rate_percent: est, confidence_score_0_100: Math.min(92, est + (htfAlignBull ? 3 : 0)),
+            invalidation_level: slBase - 0.6 * atrV,
+            trade_rationale: `${recentSweepSell ? `Sell-side liquidity at ${fmtPrice(recentSweepSell.price, params.assetType)} was swept ${n - recentSweepSell.i} candles ago (SL hunt), ` : `Price is in the discount leg of the dealing range (${smc.pd.position}), `}then tapped the active ${z.kind === "bull_fvg" ? "bullish FVG" : z.kind === "breaker_bull" ? "bullish breaker" : "bullish order block"} [${fmtPrice(z.bottom, params.assetType)}–${fmtPrice(z.top, params.assetType)}]. ${chochBull ? `${chochBull.type} bullish confirmed at ${fmtPrice(chochBull.level, params.assetType)}. ` : ""}${patternBull ? `${patternBull.name} printed at the level. ` : ""}HTF bias ${ctx.htfBias}. Invalidation below the ${recentSweepSell ? "sweep low" : "block"} — a close there voids the premise.`.trim(),
+            confluences: conf, news_caution: newsNote, risk_management_note: riskNote,
+            signal,
+            reasoning: buildReasoning(ctx, "Long", {
+              zone: { kind: z.kind, top: z.top, bottom: z.bottom, startI: z.startI, mitigated: z.mitigated },
+              sweepI: recentSweepSell?.i ?? null, sweepPrice: recentSweepSell?.price ?? null,
+              pool: buyLiq[0] ? { kind: buyLiq[0].kind, touches: buyLiq[0].touches, price: buyLiq[0].price } : null,
+              structEv: structEvOf(chochBull), entry, plannedRR: Number(rrOf(entry, sl, tp1).toFixed(2)),
+            }),
+          });
+        }
       }
     }
   }
@@ -367,18 +482,32 @@ export function localSetups(ctx: EngineCtx): RawSetup[] {
         let tp2 = sellLiq[1]?.price ?? smc.pd.rangeLow;
         if (entry - tp2 < 2.8 * risk) tp2 = entry - 3.2 * risk;
         const est = boost(conf);
-        if (est >= 60) out.push({
-          direction: "Short", entry_price: entry, stop_loss: sl, take_profit1: tp1, take_profit2: tp2,
-          estimated_win_rate_percent: est, confidence_score_0_100: Math.min(92, est + (htfAlignBear ? 3 : 0)),
-          invalidation_level: slBase + 0.6 * atrV,
-          trade_rationale: `${recentSweepBuy ? `Buy-side liquidity at ${fmtPrice(recentSweepBuy.price, params.assetType)} was swept ${n - recentSweepBuy.i} candles ago (SL hunt), ` : `Price is in the premium leg of the dealing range (${smc.pd.position}), `}then rejected from the active ${z.kind === "bear_fvg" ? "bearish FVG" : z.kind === "breaker_bear" ? "bearish breaker" : "bearish order block"} [${fmtPrice(z.bottom, params.assetType)}–${fmtPrice(z.top, params.assetType)}]. ${chochBear ? `${chochBear.type} bearish confirmed at ${fmtPrice(chochBear.level, params.assetType)}. ` : ""}${patternBear ? `${patternBear.name} printed at the level. ` : ""}HTF bias ${ctx.htfBias}. Invalidation above the ${recentSweepBuy ? "sweep high" : "block"} — a close there voids the premise.`.trim(),
-          confluences: conf, news_caution: newsNote, risk_management_note: riskNote,
-        });
+        if (est >= 60) {
+          const sigType: SignalType = recentSweepBuy ? "sweep" : "zone";
+          const signal = makeSignal(sigType, ctx, {
+            reclaimLevel: recentSweepBuy ? recentSweepBuy.price : z.top,
+            zoneTop: z.top, zoneBottom: z.bottom,
+          });
+          out.push({
+            direction: "Short", entry_price: entry, stop_loss: sl, take_profit1: tp1, take_profit2: tp2,
+            estimated_win_rate_percent: est, confidence_score_0_100: Math.min(92, est + (htfAlignBear ? 3 : 0)),
+            invalidation_level: slBase + 0.6 * atrV,
+            trade_rationale: `${recentSweepBuy ? `Buy-side liquidity at ${fmtPrice(recentSweepBuy.price, params.assetType)} was swept ${n - recentSweepBuy.i} candles ago (SL hunt), ` : `Price is in the premium leg of the dealing range (${smc.pd.position}), `}then rejected from the active ${z.kind === "bear_fvg" ? "bearish FVG" : z.kind === "breaker_bear" ? "bearish breaker" : "bearish order block"} [${fmtPrice(z.bottom, params.assetType)}–${fmtPrice(z.top, params.assetType)}]. ${chochBear ? `${chochBear.type} bearish confirmed at ${fmtPrice(chochBear.level, params.assetType)}. ` : ""}${patternBear ? `${patternBear.name} printed at the level. ` : ""}HTF bias ${ctx.htfBias}. Invalidation above the ${recentSweepBuy ? "sweep high" : "block"} — a close there voids the premise.`.trim(),
+            confluences: conf, news_caution: newsNote, risk_management_note: riskNote,
+            signal,
+            reasoning: buildReasoning(ctx, "Short", {
+              zone: { kind: z.kind, top: z.top, bottom: z.bottom, startI: z.startI, mitigated: z.mitigated },
+              sweepI: recentSweepBuy?.i ?? null, sweepPrice: recentSweepBuy?.price ?? null,
+              pool: sellLiq[0] ? { kind: sellLiq[0].kind, touches: sellLiq[0].touches, price: sellLiq[0].price } : null,
+              structEv: structEvOf(chochBear), entry, plannedRR: Number(rrOf(entry, sl, tp1).toFixed(2)),
+            }),
+          });
+        }
       }
     }
   }
 
-  // ---- confirmed breakout setups ----
+  // ---- confirmed breakout setups (structure-type signal) ----
   const bo = breakoutBull ?? breakoutBear;
   if (bo && out.length < 2 && volAbove) {
     const dir = bo.dir === "bull" ? "Long" : "Short";
@@ -391,13 +520,22 @@ export function localSetups(ctx: EngineCtx): RawSetup[] {
     if (bo.dir === "bull" ? inDiscount : inPremium) conf.push(bo.dir === "bull" ? "Discount Zone" : "Premium Zone");
     if (bo.dir === "bull" ? htfAlignBull : htfAlignBear) conf.push("HTF Alignment");
     const est = boost(conf);
-    if (est >= 60) out.push({
-      direction: dir as "Long" | "Short", entry_price: entry, stop_loss: sl, take_profit1: tp1, take_profit2: tp2,
-      estimated_win_rate_percent: est, confidence_score_0_100: Math.min(90, est),
-      invalidation_level: sl,
-      trade_rationale: `Confirmed breakout ${bo.dir === "bull" ? "above" : "below"} ${fmtPrice(bo.level, params.assetType)} with ${bo.closesBeyond} closes beyond the level and volume above the 20-period average (false-breakout filter passed). Retest entry at the broken level; failure to hold it invalidates.`,
-      confluences: conf, news_caution: newsNote, risk_management_note: riskNote, isBreakout: true,
-    });
+    if (est >= 60) {
+      const signal = makeSignal("structure", ctx, { reclaimLevel: bo.level });
+      out.push({
+        direction: dir as "Long" | "Short", entry_price: entry, stop_loss: sl, take_profit1: tp1, take_profit2: tp2,
+        estimated_win_rate_percent: est, confidence_score_0_100: Math.min(90, est),
+        invalidation_level: sl,
+        trade_rationale: `Confirmed breakout ${bo.dir === "bull" ? "above" : "below"} ${fmtPrice(bo.level, params.assetType)} with ${bo.closesBeyond} closes beyond the level and volume above the 20-period average (false-breakout filter passed). Retest entry at the broken level; failure to hold it invalidates.`,
+        confluences: conf, news_caution: newsNote, risk_management_note: riskNote, isBreakout: true,
+        signal,
+        reasoning: buildReasoning(ctx, dir as "Long" | "Short", {
+          zone: null, sweepI: null, sweepPrice: null,
+          pool: (bo.dir === "bull" ? buyLiq[0] : sellLiq[0]) ? { kind: (bo.dir === "bull" ? buyLiq[0] : sellLiq[0]).kind, touches: (bo.dir === "bull" ? buyLiq[0] : sellLiq[0]).touches, price: (bo.dir === "bull" ? buyLiq[0] : sellLiq[0]).price } : null,
+          structEv: structEvOf(undefined), entry, plannedRR: Number(rrOf(entry, sl, tp1).toFixed(2)), isBreakout: true,
+        }),
+      });
+    }
   }
 
   return out.sort((a, b) => b.confidence_score_0_100 - a.confidence_score_0_100).slice(0, 2);
@@ -405,7 +543,7 @@ export function localSetups(ctx: EngineCtx): RawSetup[] {
 
 /* ---------------- anti-hallucination validation ---------------- */
 
-export function validateSetup(raw: RawSetup, ctx: EngineCtx): { setup: TradeSetup; checks: ValidationCheck[] } {
+export function validateSetup(raw: EngineSetup, ctx: EngineCtx): TradeSetup {
   const { candles, smc, params } = ctx;
   const minLow = Math.min(...candles.map((c) => c.l)) * 0.99;
   const maxHigh = Math.max(...candles.map((c) => c.h)) * 1.01;
@@ -414,17 +552,17 @@ export function validateSetup(raw: RawSetup, ctx: EngineCtx): { setup: TradeSetu
   const A = params.assetType;
 
   checks.push({
-    name: "Price bounds",
+    name: "V1 price bounds",
     passed: [e, sl, tp1, tp2].every((p) => p >= minLow && p <= maxHigh),
     detail: `all prices within data range [${fmtPrice(minLow, A)}, ${fmtPrice(maxHigh, A)}]`,
   });
   const dirOk = raw.direction === "Long" ? sl < e && e < tp1 && tp1 <= tp2 : tp2 <= tp1 && tp1 < e && e < sl;
-  checks.push({ name: "Direction consistency", passed: dirOk, detail: raw.direction === "Long" ? "SL < entry < TP1 ≤ TP2" : "TP2 ≤ TP1 < entry < SL" });
+  checks.push({ name: "V2 direction consistency", passed: dirOk, detail: raw.direction === "Long" ? "SL < entry < TP1 ≤ TP2" : "TP2 ≤ TP1 < entry < SL" });
 
   const rr = rrOf(e, sl, tp1);
-  checks.push({ name: "RR ≥ 2.0 (recalculated)", passed: rr >= 2.0, detail: `RR = ${rr.toFixed(2)}` });
+  checks.push({ name: "V3 RR ≥ 2.0 (recalculated)", passed: rr >= 2.0, detail: `RR = ${rr.toFixed(2)}` });
   checks.push({
-    name: "Win rate ≥ 60 & confidence ≥ 60",
+    name: "V4 win rate ≥ 60 & confidence ≥ 60",
     passed: raw.estimated_win_rate_percent >= 60 && raw.confidence_score_0_100 >= 60,
     detail: `WR ${raw.estimated_win_rate_percent}% / conf ${raw.confidence_score_0_100}`,
   });
@@ -438,15 +576,19 @@ export function validateSetup(raw: RawSetup, ctx: EngineCtx): { setup: TradeSetu
   refs.push(smc.pd.eq, ...smc.pd.premium, ...smc.pd.discount);
   const tol = A === "crypto" ? 0.005 : 0.01;
   const near = refs.some((r) => Math.abs(e - r) / e <= tol);
-  checks.push({ name: `Entry near detected level (≤${(tol * 100).toFixed(1)}%)`, passed: near, detail: near ? "entry anchored to SMC/PA level" : "entry not anchored — rejected" });
+  checks.push({ name: `V5 entry near detected level (≤${(tol * 100).toFixed(1)}%)`, passed: near, detail: near ? "entry anchored to SMC/PA level" : "entry not anchored" });
 
   if (raw.isBreakout) {
     const match = smc.breakouts.some((b) => b.state === "confirmed" && b.volOk && b.closesBeyond >= 2 && Math.abs(b.level - e) / e <= tol * 2 && ((raw.direction === "Long" && b.dir === "bull") || (raw.direction === "Short" && b.dir === "bear")));
-    checks.push({ name: "False-breakout filter (volume + 2 closes)", passed: match, detail: match ? "confirmed breakout with volume" : "breakout conditions not met — rejected" });
+    checks.push({ name: "V6 false-breakout filter (volume + 2 closes)", passed: match, detail: match ? "confirmed breakout with volume" : "breakout conditions not met" });
   }
 
   const passed = checks.every((c) => c.passed);
-  const setup: TradeSetup = {
+  const reasoning: Reasoning = {
+    ...raw.reasoning,
+    rejectionReason: passed ? null : `REJECTED — ${checks.filter((c) => !c.passed).map((c) => `${c.name} (${c.detail})`).join("; ")}`,
+  };
+  return {
     id: uid(),
     direction: raw.direction,
     entry_price: e, stop_loss: sl, take_profit1: tp1, take_profit2: tp2,
@@ -461,8 +603,34 @@ export function validateSetup(raw: RawSetup, ctx: EngineCtx): { setup: TradeSetu
     isBreakout: raw.isBreakout,
     validation: { passed, checks },
     source: "engine",
+    signal: raw.signal,
+    reasoning,
   };
-  return { setup, checks };
+}
+
+/* ---------------- live signal status ---------------- */
+
+export function signalStatus(
+  setup: TradeSetup,
+  result: { smc: SMCAnalysis },
+  now: number,
+  price: number,
+): { status: "ACTIVE" | "EXPIRED"; reason: string } {
+  const sig = setup.signal;
+  if (!sig) return { status: "ACTIVE", reason: "no validity window attached" };
+  if (now > sig.validTillTs) return { status: "EXPIRED", reason: `validity window elapsed (${sig.validCandles} setup-candles)` };
+  if (sig.reclaimLevel != null) {
+    const long = setup.direction === "Long";
+    if (long ? price < sig.reclaimLevel : price > sig.reclaimLevel) {
+      return { status: "EXPIRED", reason: "level reclaimed against direction (live price)" };
+    }
+  }
+  if (sig.type === "structure") {
+    const opposite = setup.direction === "Long" ? "bear" : "bull";
+    const ev = result.smc.structure.filter((e) => e.dir === opposite && e.t > sig.generatedAt).slice(-1)[0];
+    if (ev) return { status: "EXPIRED", reason: `opposite ${ev.type} printed after signal` };
+  }
+  return { status: "ACTIVE", reason: "valid" };
 }
 
 /* ---------------- risk ---------------- */
@@ -510,40 +678,64 @@ export async function sendTelegram(settings: Settings, text: string): Promise<bo
 
 /* ---------------- orchestrator ---------------- */
 
+function wrapAISetup(raw: RawSetup, ctx: EngineCtx): EngineSetup {
+  return {
+    ...raw,
+    signal: makeSignal("zone", ctx, { reclaimLevel: raw.invalidation_level ?? null }),
+    reasoning: {
+      htfBias: ctx.htfBias,
+      htfRationale: biasRationale(ctx.htfSmc, ctx.htfInd, ctx.htfCandles),
+      liquidity: null, sweep: null, structureEvent: null, zone: null,
+      session: detectSession(ctx.generatedAt),
+      plannedRR: Number(rrOf(raw.entry_price, raw.stop_loss, raw.take_profit1).toFixed(2)),
+      entryModel: ENTRY_MODEL,
+      rejectionReason: null,
+    },
+  };
+}
+
 export async function runAnalysis(params: AnalyzeParams, settings: Settings, log: Log): Promise<AnalysisResult> {
   const t0 = performance.now();
   const htf = HTF_MAP[params.timeframe];
   const ltf = LTF_MAP[params.timeframe];
 
-  log(`pipeline start · ${params.symbol} ${params.timeframe} (HTF ${htf} · LTF ${ltf})`);
+  log(`pipeline start · ${params.symbol} ${params.timeframe} (HTF ${htf} · LTF ${ltf}) · confirmed-candles-only`);
   const stfRes = await fetchCandles(params.symbol, params.assetType, params.timeframe, 300, log);
   const htfRes = htf === params.timeframe ? stfRes : await fetchCandles(params.symbol, params.assetType, htf, 300, log);
   const ltfRes = ltf === params.timeframe ? stfRes : await fetchCandles(params.symbol, params.assetType, ltf, 300, log);
 
+  // SCALP-1.0: analysis runs on CONFIRMED candles only — the forming candle is chart-only
+  const drop = (arr: Candle[]) => (arr.length > 80 ? arr.slice(0, -1) : arr);
+  const stfC = drop(stfRes.candles), htfC = drop(htfRes.candles), ltfC = drop(ltfRes.candles);
+  const stepMs = TF_MINUTES[params.timeframe] * 60_000;
+  const generatedAt = last(stfC).t + stepMs;
+  log(`confirming candle closed ${fmtIST(generatedAt)} — signal clock starts`, "info");
+
   log("computing indicators ×3 timeframes…");
-  const ind = computeIndicators(stfRes.candles);
-  const indHtf = computeIndicators(htfRes.candles);
-  const indLtf = computeIndicators(ltfRes.candles);
+  const ind = computeIndicators(stfC);
+  const indHtf = computeIndicators(htfC);
+  const indLtf = computeIndicators(ltfC);
 
   log("detecting SMC/ICT/PA/SL-hunt levels (STF + HTF)…");
-  const smc = analyzeSMC(stfRes.candles);
-  const htfSmc = analyzeSMC(htfRes.candles);
+  const smc = analyzeSMC(stfC);
+  const htfSmc = analyzeSMC(htfC);
 
   const [news, sentiment] = await Promise.all([fetchNews(params.symbol, params.assetType, log), fetchSentiment(log)]);
   const trades = loadTrades();
   const perf = computePerformance(trades);
   log(`journal: ${perf.total} closed trades · WR ${perf.winRate.toFixed(0)}%${perf.recent.tilt ? " · TILT flag" : ""}`);
 
-  const htf_bias = deriveBias(htfSmc, indHtf, htfRes.candles);
-  const stf_bias = deriveBias(smc, ind, stfRes.candles);
-  const ltf_bias = deriveBias(smc, indLtf, ltfRes.candles);
+  const htf_bias = deriveBias(htfSmc, indHtf, htfC);
+  const stf_bias = deriveBias(smc, ind, stfC);
+  const ltf_bias = deriveBias(smc, indLtf, ltfC);
   log(`bias HTF ${htf_bias} · STF ${stf_bias} · LTF ${ltf_bias}`, "ok");
 
   const engineCtx: EngineCtx = {
-    params, candles: stfRes.candles, ind, smc, htfSmc, htfBias: htf_bias, perf, newsCount: news.length,
+    params, candles: stfC, ind, smc, htfSmc, htfInd: indHtf, htfCandles: htfC,
+    htfBias: htf_bias, perf, newsCount: news.length, generatedAt, stepMs,
   };
 
-  let rawSetups: RawSetup[] = [];
+  let candidates: EngineSetup[] = [];
   let engine = "TradeVision Offline Engine";
   let aiSummary: string | null = null;
   let aiSelfNote: string | null = null;
@@ -554,46 +746,48 @@ export async function runAnalysis(params: AnalyzeParams, settings: Settings, log
     try {
       log(`prompt → ${settings.provider} (${settings.model || "default model"})…`);
       const prompt = buildPrompt({
-        params, stf: stfRes.candles, htf: htfRes.candles, ltf: ltfRes.candles,
+        params, stf: stfC, htf: htfC, ltf: ltfC,
         indStf: ind, indHtf: indHtf, indLtf: indLtf, smcStf: smc, smcHtf: htfSmc,
         perf, news,
       });
       const text = await callAIProvider(settings, prompt);
       const env = parseAIJson(text);
-      rawSetups = (env.setups ?? []).slice(0, 2);
+      candidates = (env.setups ?? []).slice(0, 2).map((r) => wrapAISetup(r, engineCtx));
       aiSummary = env.summary ?? null;
       aiSelfNote = env.self_learning_note ?? null;
       aiNewsSummary = env.news_summary ?? null;
       aiKeyLevels = env.key_levels ?? null;
       engine = settings.provider.toUpperCase();
-      log(`AI returned ${rawSetups.length} candidate setup(s) → validating…`, "ok");
+      log(`AI returned ${candidates.length} candidate setup(s) → validating…`, "ok");
     } catch (e) {
       log(`AI provider failed (${e instanceof Error ? e.message : "?"}) → offline engine fallback`, "err");
-      rawSetups = localSetups(engineCtx);
+      candidates = localSetups(engineCtx);
     }
   } else {
     log("offline engine: deriving setups from detected structure…");
-    rawSetups = localSetups(engineCtx);
+    candidates = localSetups(engineCtx);
   }
 
-  const validated = rawSetups.map((r) => validateSetup(r, engineCtx));
+  const validated = candidates.map((c) => validateSetup(c, engineCtx));
   for (const v of validated) {
-    const failed = v.checks.filter((c) => !c.passed);
-    if (failed.length) log(`setup ${v.setup.direction}@${fmtPrice(v.setup.entry_price, params.assetType)} rejected: ${failed.map((f) => f.name).join(", ")}`, "warn");
-    else log(`setup ${v.setup.direction}@${fmtPrice(v.setup.entry_price, params.assetType)} passed all ${v.checks.length} checks ✓`, "ok");
+    const failed = v.validation.checks.filter((c) => !c.passed);
+    if (failed.length) log(`setup ${v.direction}@${fmtPrice(v.entry_price, params.assetType)} rejected: ${failed.map((f) => f.name).join(", ")}`, "warn");
+    else log(`setup ${v.direction}@${fmtPrice(v.entry_price, params.assetType)} passed all ${v.validation.checks.length} checks ✓`, "ok");
   }
-  const setups = validated.filter((v) => v.setup.validation.passed).map((v) => {
-    const pos = computePosition(v.setup.entry_price, v.setup.stop_loss, v.setup.take_profit1, v.setup.take_profit2, params.accountSize, params.riskPercent);
-    return { ...v.setup, position: pos, source: engine };
-  });
+  const setups = validated.filter((v) => v.validation.passed).map((v) => ({
+    ...v,
+    position: computePosition(v.entry_price, v.stop_loss, v.take_profit1, v.take_profit2, params.accountSize, params.riskPercent),
+    source: engine,
+  }));
+  const rejectedSetups = validated.filter((v) => !v.validation.passed);
 
   if (setups.length && (settings.telegramToken && settings.telegramChatId)) {
-    const ok = await sendTelegram(settings, `TradeVision: ${setups.length} validated setup(s) on ${params.symbol} ${params.timeframe}\n` + setups.map((s) => `${s.direction} ${fmtPrice(s.entry_price, params.assetType)} → TP1 ${fmtPrice(s.take_profit1, params.assetType)} (RR ${s.risk_reward_ratio})`).join("\n"));
+    const ok = await sendTelegram(settings, `TradeVision: ${setups.length} validated setup(s) on ${params.symbol} ${params.timeframe}\n` + setups.map((s) => `${s.direction} ${fmtPrice(s.entry_price, params.assetType)} → TP1 ${fmtPrice(s.take_profit1, params.assetType)} (RR ${s.risk_reward_ratio}) · valid till ${fmtIST(s.signal?.validTillTs ?? 0)}`).join("\n"));
     log(ok ? "Telegram alert sent ✓" : "Telegram send failed (network/CORS)", ok ? "ok" : "warn");
   }
 
   const lastPrice = last(stfRes.candles).c;
-  const refClose = stfRes.candles[Math.max(0, stfRes.candles.length - 25)]?.c ?? lastPrice;
+  const refClose = stfC[Math.max(0, stfC.length - 25)]?.c ?? lastPrice;
   const localSummary = `${stf_bias === "ranging" ? "Range-bound" : stf_bias === "bullish" ? "Bullish" : "Bearish"} STF structure (trend: ${smc.trend}) under a ${htf_bias} HTF bias. Price is in the ${smc.pd.position} of the dealing range [${fmtPrice(smc.pd.rangeLow, params.assetType)}–${fmtPrice(smc.pd.rangeHigh, params.assetType)}]. ${smc.structure.slice(-2).map((e) => `${e.type} ${e.dir} @ ${fmtPrice(e.level, params.assetType)}`).join("; ") || "No fresh structure breaks"}. ${smc.zones.filter((z) => z.active).length} active OB/FVG zones, ${smc.liquidity.filter((p) => p.touches >= 2).length} engineered liquidity pool(s). ${setups.length ? "" : "No high-probability setup found with required confluences and filters."}`;
   const localSelf = perf.total === 0
     ? "No journal history yet — baseline strictness applied. Log every trade so the engine can learn your edge."
@@ -629,6 +823,8 @@ export async function runAnalysis(params: AnalyzeParams, settings: Settings, log
     news_summary: aiNewsSummary ?? localNews,
     news, sentiment,
     setups,
+    rejectedSetups,
+    confirmedOnly: true,
     engine,
     performance: perf,
     accountSize: params.accountSize,
@@ -636,5 +832,3 @@ export async function runAnalysis(params: AnalyzeParams, settings: Settings, log
     durationMs: performance.now() - t0,
   };
 }
-
-export type { Timeframe };

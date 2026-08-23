@@ -101,6 +101,34 @@ export interface PerformanceSummary {
   equity: number[];
 }
 
+export type SignalType = "sweep" | "zone" | "structure";
+
+export interface SignalInfo {
+  type: SignalType;
+  generatedAt: number;        // UTC ms of confirming candle CLOSE
+  displayTimeIST: string;     // Asia/Kolkata render
+  validCandles: number;       // 15 sweep / 30 zone / 45 structure
+  validTillTs: number;        // generatedAt + validCandles * stepMs (event expiry may precede)
+  stepMs: number;
+  reclaimLevel: number | null;   // close beyond this against direction → EXPIRED
+  zoneTop: number | null;        // zone-based: close through far edge → fully mitigated
+  zoneBottom: number | null;
+  expiryRules: string;
+}
+
+export interface Reasoning {
+  htfBias: Bias;
+  htfRationale: string;
+  liquidity: { grade: "A" | "B" | "C"; source: string; distanceAtr: number } | null;
+  sweep: { depthAtr: number; reclaim: boolean; displacementAtr: number; trapScore: number } | null;
+  structureEvent: { type: "BOS" | "CHoCH"; dir: "bull" | "bear"; ts: number; level: number } | null;
+  zone: { kind: string; grade: "A" | "B"; distanceAtr: number } | null;
+  session: { name: string; bonus: number };
+  plannedRR: number;
+  entryModel: string;
+  rejectionReason: string | null;
+}
+
 export interface TradeSetup {
   id: string;
   direction: Direction;
@@ -120,6 +148,8 @@ export interface TradeSetup {
   validation: { passed: boolean; checks: ValidationCheck[] };
   position?: PositionSizing;
   source: string;
+  signal?: SignalInfo;
+  reasoning?: Reasoning;
 }
 
 export interface ValidationCheck { name: string; passed: boolean; detail: string }
@@ -167,6 +197,8 @@ export interface AnalysisResult {
   news: NewsItem[];
   sentiment: Sentiment | null;
   setups: TradeSetup[];
+  rejectedSetups: TradeSetup[];
+  confirmedOnly: boolean;
   engine: string;
   performance: PerformanceSummary;
   accountSize: number;
@@ -209,6 +241,10 @@ export interface Trade {
   closedAt: number | null;
   notes: string;
   source: TradeSource;
+  signalType?: SignalType;
+  signalGeneratedAt?: number;
+  signalDisplayIST?: string;
+  signalValidTill?: number;
 }
 
 export interface AlertRule {
@@ -236,21 +272,44 @@ export interface Settings {
 
 export interface BacktestTrade {
   i: number; t: number; direction: Direction; entry: number; sl: number; tp1: number; tp2: number;
-  rr: number; outcome: TradeOutcome; pnlR: number; confluences: string[];
+  rr: number; outcome: TradeOutcome;
+  grossR: number;      // price movement only
+  feesR: number;       // maker entry + taker exit + slippage both legs, in R
+  pnlR: number;        // NET = grossR - feesR (the ledger of record)
+  confluences: string[];
+  signalType: SignalType;
+  generatedAt: number;
 }
+
+export interface ExpiryLogItem { i: number; t: number; direction: Direction; signalType: SignalType; reason: string }
+
+export interface BacktestFunnel {
+  generated: number;
+  expiredBeforeTrigger: number;
+  entered: number;
+  wins: number;
+  losses: number;
+  breakeven: number;
+}
+
+export interface CostModel { makerPct: number; takerPct: number; slippagePct: number; entryPct: number; exitPct: number }
 
 export interface BacktestResult {
   params: { symbol: string; assetType: AssetType; timeframe: Timeframe; days: number };
   totalCandles: number;
   trades: BacktestTrade[];
   skippedInvalid: number;
+  funnel: BacktestFunnel;
+  expiryLog: ExpiryLogItem[];
+  costs: CostModel;
   winRate: number;
   profitFactor: number;
   expectancyR: number;
   maxDrawdownR: number;
   sharpe: number;
   netR: number;
-  equityR: number[];
+  grossR: number;
+  equityR: number[];   // NET equity curve
   durationMs: number;
   dataSource: string;
 }

@@ -1,11 +1,59 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AnalysisResult, AssetType, LogLine, Settings, Timeframe, TradeSetup } from "../lib/types";
-import { runAnalysis } from "../lib/ai";
+import { runAnalysis, signalStatus } from "../lib/ai";
 import { fetchLastPrice } from "../lib/marketData";
 import { addAlert, addTrade, loadAlerts, markAlertTriggered } from "../lib/journal";
-import { fmtAgo, fmtMoney, fmtPrice, normSymbol, TF_LIST, cls } from "../lib/utils";
+import { fmtAgo, fmtIST, fmtMoney, fmtPrice, fmtTime, normSymbol, TF_LIST, cls } from "../lib/utils";
 import { CandleChart } from "./CandleChart";
 import { Badge, BiasPill, Btn, Card, IBell, IBrain, ICandles, ICheck, IClock, IDown, IExt, IFlask, ILayers, INews, IPlay, IRadar, ITarget, IUp, IWarn, IX, IZap, Meter, PctCell, Segmented, SparkLine, Stat, useToast } from "./ui";
+
+function SignalCountdown({ setup, result, price }: { setup: TradeSetup; result: AnalysisResult; price: number | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const sig = setup.signal;
+  if (!sig) return null;
+  const st = signalStatus(setup, result, now, price ?? result.lastPrice);
+  if (st.status === "EXPIRED") return <Badge tone="bear">EXPIRED · {st.reason.toUpperCase()}</Badge>;
+  const rem = Math.max(0, sig.validTillTs - now);
+  const mm = Math.floor(rem / 60000);
+  const ss = Math.floor((rem % 60000) / 1000);
+  return (
+    <span title={sig.expiryRules}>
+      <Badge tone="gold">
+        <IClock size={10} /> VALID TILL {fmtIST(sig.validTillTs).slice(11)} · {mm}m {ss.toString().padStart(2, "0")}s
+      </Badge>
+    </span>
+  );
+}
+
+function ReasoningBlock({ s, result }: { s: TradeSetup; result: AnalysisResult }) {
+  const r = s.reasoning;
+  if (!r) return null;
+  const Row = ({ k, v, tone }: { k: string; v: string; tone?: string }) => (
+    <div className="rounded border border-ink-600/60 bg-ink-900/60 px-2.5 py-1.5">
+      <span className="mr-2 text-fog-500">{k}</span>
+      <span className={tone ?? "text-fog-200"}>{v}</span>
+    </div>
+  );
+  return (
+    <details className="group border-t border-ink-600/70 px-4 py-2">
+      <summary className="cursor-pointer select-none font-mono text-[10.5px] tracking-widest text-gold-500 hover:text-gold-300">
+        WHY THIS TRADE · {r.session.name.toUpperCase()} SESSION ({r.session.bonus >= 0 ? "+" : ""}{r.session.bonus} WR) · PLANNED RR {r.plannedRR}
+      </summary>
+      <div className="mt-2 grid gap-1.5 pb-1 font-mono text-[10.5px] leading-relaxed md:grid-cols-2">
+        <Row k="HTF BIAS" v={r.htfRationale} />
+        <Row k="LIQUIDITY" v={r.liquidity ? `grade ${r.liquidity.grade} · ${r.liquidity.source} · ${r.liquidity.distanceAtr} ATR from entry` : "no target pool in range"} />
+        <Row k="SWEEP EVIDENCE" v={r.sweep ? `depth ${r.sweep.depthAtr} ATR · reclaim ${r.sweep.reclaim ? "yes" : "no"} · displacement ${r.sweep.displacementAtr} ATR · trap score ${r.sweep.trapScore}/100` : "no sweep — zone/PD entry"} tone={r.sweep ? "text-gold-300" : undefined} />
+        <Row k="STRUCTURE" v={r.structureEvent ? `${r.structureEvent.type} ${r.structureEvent.dir} @ ${fmtPrice(r.structureEvent.level, result.assetType)} · ${fmtTime(r.structureEvent.ts, result.timeframe)}` : "no fresh BOS/CHoCH"} />
+        <Row k="ZONE QUALITY" v={r.zone ? `${r.zone.kind} grade ${r.zone.grade} · ${r.zone.distanceAtr} ATR from entry` : "n/a (structure setup)"} />
+        <Row k="EXECUTION" v={r.entryModel} tone="text-info-400" />
+      </div>
+    </details>
+  );
+}
 
 const QUICK: Record<AssetType, string[]> = {
   crypto: ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
@@ -108,6 +156,8 @@ export function TerminalView(props: {
       rr: s.risk_reward_ratio, confidence: s.confidence_score_0_100, confluences: s.confluences,
       rationale: s.trade_rationale, status: "pending", outcome: null, exitPrice: null, pnlPct: null, pnlR: null,
       closedAt: null, notes: "", source: "ai",
+      signalType: s.signal?.type, signalGeneratedAt: s.signal?.generatedAt,
+      signalDisplayIST: s.signal?.displayTimeIST, signalValidTill: s.signal?.validTillTs,
     });
     props.onTradesChanged();
     toast.push("ok", `${s.direction} ${result.symbol} @ ${fmtPrice(s.entry_price, result.assetType)} added to journal as pending`);
@@ -237,7 +287,12 @@ export function TerminalView(props: {
           <Card
             icon={<ITarget size={15} />}
             title={`Trade Setups · ${result?.setups.length ?? 0}`}
-            right={<Badge tone={result?.setups.length ? "bull" : "dim"}>{result?.setups.length ? "VALIDATED" : "STAND ASIDE"}</Badge>}
+            right={
+              <div className="flex items-center gap-1.5">
+                {result?.confirmedOnly && <Badge tone="info">CONFIRMED-CANDLE SIGNALS</Badge>}
+                <Badge tone={result?.setups.length ? "bull" : "dim"}>{result?.setups.length ? "VALIDATED" : "STAND ASIDE"}</Badge>
+              </div>
+            }
           >
             {!result && <p className="text-sm text-fog-400">Run analysis to generate setups.</p>}
             {result && result.setups.length === 0 && (
@@ -250,23 +305,32 @@ export function TerminalView(props: {
             )}
             {result?.setups.map((s) => {
               const long = s.direction === "Long";
+              const expired = s.signal
+                ? signalStatus(s, result, Date.now(), livePrice ?? result.lastPrice).status === "EXPIRED"
+                : false;
               return (
                 <article key={s.id} className={cls(
                   "tv-rise mb-3 rounded-lg border bg-ink-800/40 transition-colors last:mb-0",
                   focusSetup === s.id ? (long ? "border-bull-600/60" : "border-bear-600/60") : "border-ink-600",
+                  expired && "opacity-70",
                 )}>
                   <div className="flex flex-wrap items-center gap-2 border-b border-ink-600/70 px-4 py-2.5">
                     <Badge tone={long ? "bull" : "bear"} className="px-2 py-1 text-[11px] font-bold">
                       {long ? <IUp size={12} /> : <IDown size={12} />} {s.direction.toUpperCase()}
                     </Badge>
+                    {s.signal && (
+                      <Badge tone="dim">{s.signal.type === "sweep" ? "SWEEP" : s.signal.type === "structure" ? "BOS/CHoCH" : "OB/FVG"} · {s.signal.validCandles}C</Badge>
+                    )}
                     <span className="font-mono text-sm font-bold text-fog-100">{fmtPrice(s.entry_price, result.assetType)}</span>
                     <Badge tone="gold">RR {s.risk_reward_ratio.toFixed(2)}</Badge>
                     <Badge tone="info">WR {s.estimated_win_rate_percent}%</Badge>
                     <Badge tone={s.confidence_score_0_100 >= 75 ? "bull" : "dim"}>CONF {s.confidence_score_0_100}</Badge>
-                    <Badge tone="dim">{s.source}</Badge>
+                    <SignalCountdown setup={s} result={result} price={livePrice} />
                     <div className="ml-auto flex items-center gap-1.5">
                       <Btn size="xs" variant={focusSetup === s.id ? "dark" : "ghost"} onClick={() => setFocusSetup(s.id)}><ICandles size={12} /> CHART</Btn>
-                      <Btn size="xs" variant="success" onClick={() => takeTrade(s)}><ICheck size={12} /> TAKE TRADE</Btn>
+                      <Btn size="xs" variant="success" disabled={expired} onClick={() => takeTrade(s)}>
+                        <ICheck size={12} /> {expired ? "EXPIRED" : "TAKE TRADE"}
+                      </Btn>
                       <Btn size="xs" variant="outline" onClick={() => props.onGotoBacktest({ symbol: result.symbol, assetType: result.assetType, timeframe: result.timeframe })}><IFlask size={12} /> BACKTEST</Btn>
                       <Btn size="xs" variant="outline" onClick={() => setAlert(s)}><IBell size={12} /> ALERT</Btn>
                     </div>
@@ -287,6 +351,7 @@ export function TerminalView(props: {
                     {s.confluences.map((c) => <Badge key={c} tone="gold">{c}</Badge>)}
                   </div>
                   <p className="px-4 pb-3 text-xs leading-relaxed text-fog-300">{s.trade_rationale}</p>
+                  <ReasoningBlock s={s} result={result} />
                   {(s.news_caution || s.risk_management_note) && (
                     <div className="grid gap-2 px-4 pb-3 text-[11px] md:grid-cols-2">
                       {s.news_caution && <div className="rounded border border-gold-600/40 bg-gold-500/8 px-2.5 py-1.5 text-gold-300"><span className="mr-1 font-bold">NEWS ⚠</span>{s.news_caution}</div>}
@@ -310,6 +375,30 @@ export function TerminalView(props: {
                 </article>
               );
             })}
+            {result && result.rejectedSetups.length > 0 && (
+              <details className="mt-3 rounded-md border border-bear-600/30 bg-ink-900/40 px-3 py-2">
+                <summary className="cursor-pointer select-none font-mono text-[10.5px] tracking-widest text-bear-300 hover:text-bear-400">
+                  WHY NOT · {result.rejectedSetups.length} CANDIDATE{result.rejectedSetups.length > 1 ? "S" : ""} REJECTED BY VALIDATOR
+                </summary>
+                <ul className="mt-2 space-y-2 pb-1">
+                  {result.rejectedSetups.map((r, ri) => (
+                    <li key={ri} className="rounded border border-ink-600/60 bg-ink-800/40 px-2.5 py-2">
+                      <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10.5px]">
+                        <Badge tone={r.direction === "Long" ? "bull" : "bear"}>{r.direction.toUpperCase()}</Badge>
+                        <span className="font-bold text-fog-200">{fmtPrice(r.entry_price, result.assetType)}</span>
+                        <span className="text-fog-500">→ SL {fmtPrice(r.stop_loss, result.assetType)} · TP1 {fmtPrice(r.take_profit1, result.assetType)}</span>
+                      </div>
+                      <p className="mt-1 font-mono text-[10.5px] leading-relaxed text-bear-300">{r.reasoning?.rejectionReason ?? "failed validation"}</p>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {r.validation.checks.filter((c) => !c.passed).map((c, ci) => (
+                          <Badge key={ci} tone="bear">{c.name}</Badge>
+                        ))}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
           </Card>
         </div>
 

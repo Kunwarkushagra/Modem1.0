@@ -101,63 +101,86 @@ export function BacktestView(props: {
 
       {result && (
         <>
+          {/* signal funnel */}
+          <div className="tv-panel flex flex-wrap items-center gap-2 px-4 py-2.5 font-mono text-[10.5px] tracking-wider">
+            <span className="text-fog-500">SIGNAL FUNNEL</span>
+            <Badge tone="info">{result.funnel.generated} GENERATED</Badge>
+            <span className="text-fog-500">→</span>
+            <Badge tone="warn">{result.funnel.expiredBeforeTrigger} EXPIRED PRE-TRIGGER</Badge>
+            <span className="text-fog-500">→</span>
+            <Badge tone="gold">{result.funnel.entered} ENTERED</Badge>
+            <span className="text-fog-500">→</span>
+            <Badge tone="bull">{result.funnel.wins}W</Badge>
+            <Badge tone="bear">{result.funnel.losses}L</Badge>
+            <Badge tone="dim">{result.funnel.breakeven}BE</Badge>
+            <span className="ml-auto text-fog-500">
+              COSTS/LEG: {result.costs.makerPct * 100}% MAKER ENTRY · {result.costs.takerPct * 100}% TAKER EXIT · {result.costs.slippagePct * 100}% SLIPPAGE — ALL METRICS NET
+            </span>
+          </div>
+
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
-            <Stat label="Trades" value={String(result.trades.length)} sub={`${result.skippedInvalid} filtered out`} />
-            <Stat label="Win Rate" value={result.winRate.toFixed(1) + "%"} tone={result.winRate >= 50 ? "bull" : "dim"} />
-            <Stat label="Profit Factor" value={result.profitFactor.toFixed(2)} tone={result.profitFactor >= 1 ? "gold" : "bear"} />
-            <Stat label="Expectancy" value={(result.expectancyR > 0 ? "+" : "") + result.expectancyR.toFixed(2) + "R"} tone={result.expectancyR >= 0 ? "bull" : "bear"} />
-            <Stat label="Max Drawdown" value={"−" + result.maxDrawdownR.toFixed(1) + "R"} tone="bear" />
-            <Stat label="Sharpe (trade)" value={result.sharpe.toFixed(2)} />
-            <Stat label="Net Result" value={(result.netR > 0 ? "+" : "") + result.netR.toFixed(1) + "R"} tone={result.netR >= 0 ? "bull" : "bear"} sub={`on ${result.totalCandles} candles`} />
+            <Stat label="Entries" value={String(result.funnel.entered)} sub={`${result.skippedInvalid} failed validation`} />
+            <Stat label="Win Rate (net)" value={result.winRate.toFixed(1) + "%"} tone={result.winRate >= 50 ? "bull" : "dim"} sub="BE excluded" />
+            <Stat label="Profit Factor" value={result.profitFactor.toFixed(2)} tone={result.profitFactor >= 1 ? "gold" : "bear"} sub="net ledger" />
+            <Stat label="Expectancy" value={(result.expectancyR > 0 ? "+" : "") + result.expectancyR.toFixed(2) + "R"} tone={result.expectancyR >= 0 ? "bull" : "bear"} sub="net / trade" />
+            <Stat label="Max Drawdown" value={"−" + result.maxDrawdownR.toFixed(1) + "R"} tone="bear" sub="net equity" />
+            <Stat label="Sharpe (trade)" value={result.sharpe.toFixed(2)} sub="net returns" />
+            <Stat label="Net Result" value={(result.netR > 0 ? "+" : "") + result.netR.toFixed(1) + "R"} tone={result.netR >= 0 ? "bull" : "bear"} sub={`gross ${(result.grossR > 0 ? "+" : "") + result.grossR.toFixed(1)}R`} />
           </div>
 
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
-            <Card className="xl:col-span-2" icon={<IFlask size={15} />} title="Equity Curve (R multiples)"
-              right={<Badge tone={hasEdge ? "bull" : "bear"}>{hasEdge ? "EDGE DETECTED" : "NO EDGE IN WINDOW"}</Badge>}>
+            <Card className="xl:col-span-2" icon={<IFlask size={15} />} title="NET Equity Curve (R multiples)"
+              right={<Badge tone={hasEdge ? "bull" : "bear"}>{hasEdge ? "EDGE DETECTED (NET)" : "NO EDGE IN WINDOW"}</Badge>}>
               <SparkLine values={result.equityR} width={680} height={120} baseline={0} />
               <p className="mt-2 text-[11px] leading-relaxed text-fog-400">
-                Each trade risks 1R. TP1 partials are modelled as stop-to-breakeven after first target; ambiguous candles resolve against the trade (conservative).
+                Curve is built from the NET ledger: every entry charged 0.02% maker + 0.05% slippage, every exit 0.10% taker + 0.05% slippage.
+                Fills occur at the next candle OPEN after the trigger close; TP1 moves the stop to breakeven; ambiguous candles resolve against the trade.
                 {result.skippedInvalid > 0 && ` ${result.skippedInvalid} candidate(s) were discarded by the same anti-hallucination validator used live.`}
               </p>
             </Card>
             <Card icon={<IWarn size={15} />} title="Honest Read">
               <ul className="space-y-2 text-[11.5px] leading-relaxed text-fog-300">
-                <li className="flex gap-2"><span className="text-gold-400">·</span>Short windows overfit easily — validate on a second, non-overlapping period before trusting a strategy.</li>
-                <li className="flex gap-2"><span className="text-gear-400 text-gold-400">·</span>No fees/slippage modelled; real fills on {result.params.timeframe} entries will shave expectancy.</li>
+                <li className="flex gap-2"><span className="text-gold-400">·</span>Confirmed-candles-only: signals use candles [0..i], fills at open of the next bar — no forming-candle repaint.</li>
+                <li className="flex gap-2"><span className="text-gold-400">·</span>{result.funnel.expiredBeforeTrigger} of {result.funnel.generated} signals expired before trigger — validity windows are enforced, never entered after expiry.</li>
+                <li className="flex gap-2"><span className="text-gold-400">·</span>Single in-sample pass: no untouched OOS split yet. Validate on a second, non-overlapping window before trusting it.</li>
                 <li className="flex gap-2"><span className="text-gold-400">·</span>{result.trades.length < 10 ? "Sample size is small; treat the numbers as directional, not statistical." : "Sample size is reasonable, but regime shifts can invalidate the pattern."}</li>
                 <li className="flex gap-2"><span className="text-gold-400">·</span>Feed: {result.dataSource} · duration {(result.durationMs / 1000).toFixed(1)}s.</li>
               </ul>
             </Card>
           </div>
 
-          <Card icon={<IFlask size={15} />} title={`Simulated Trades · ${result.trades.length}`} bodyClass="p-0">
+          <Card icon={<IFlask size={15} />} title={`Simulated Trades · ${result.trades.length} · NET LEDGER`} bodyClass="p-0">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[760px] text-left font-mono text-[11px]">
+              <table className="w-full min-w-[900px] text-left font-mono text-[11px]">
                 <thead>
                   <tr className="border-b border-ink-600/70 text-[9.5px] tracking-[0.14em] text-fog-500">
                     <th className="px-4 py-2 font-medium">TIME</th>
                     <th className="px-2 py-2 font-medium">DIR</th>
-                    <th className="px-2 py-2 font-medium">ENTRY</th>
+                    <th className="px-2 py-2 font-medium">TYPE</th>
+                    <th className="px-2 py-2 font-medium">ENTRY (next open)</th>
                     <th className="px-2 py-2 font-medium">SL</th>
-                    <th className="px-2 py-2 font-medium">TP1</th>
                     <th className="px-2 py-2 font-medium">RR</th>
                     <th className="px-2 py-2 font-medium">CONFLUENCES</th>
                     <th className="px-2 py-2 font-medium">OUTCOME</th>
-                    <th className="px-2 py-2 font-medium">PNL</th>
+                    <th className="px-2 py-2 font-medium">GROSS</th>
+                    <th className="px-2 py-2 font-medium">FEES</th>
+                    <th className="px-2 py-2 font-medium">NET</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {result.trades.length === 0 && <tr><td colSpan={9} className="px-4 py-8 text-center text-fog-500">No validated setups occurred in this window.</td></tr>}
+                  {result.trades.length === 0 && <tr><td colSpan={11} className="px-4 py-8 text-center text-fog-500">No validated setups occurred in this window.</td></tr>}
                   {result.trades.map((t, i) => (
                     <tr key={i} className="border-b border-ink-600/40 hover:bg-ink-750/60">
                       <td className="px-4 py-2 text-fog-400">{fmtTime(t.t, result.params.timeframe)}</td>
                       <td className="px-2 py-2"><Badge tone={t.direction === "Long" ? "bull" : "bear"}>{t.direction === "Long" ? "LONG" : "SHORT"}</Badge></td>
+                      <td className="px-2 py-2"><Badge tone="dim">{t.signalType === "sweep" ? "SWEEP" : t.signalType === "structure" ? "BOS" : "ZONE"}</Badge></td>
                       <td className="px-2 py-2 text-gold-300">{fmtNum(t.entry, t.entry < 10 ? 5 : 2)}</td>
                       <td className="px-2 py-2 text-bear-400">{fmtNum(t.sl, t.sl < 10 ? 5 : 2)}</td>
-                      <td className="px-2 py-2 text-bull-400">{fmtNum(t.tp1, t.tp1 < 10 ? 5 : 2)}</td>
                       <td className="px-2 py-2 text-fog-200">{t.rr.toFixed(1)}</td>
-                      <td className="max-w-[200px] truncate px-2 py-2 text-fog-400" title={t.confluences.join(", ")}>{t.confluences.join(", ")}</td>
+                      <td className="max-w-[180px] truncate px-2 py-2 text-fog-400" title={t.confluences.join(", ")}>{t.confluences.join(", ")}</td>
                       <td className="px-2 py-2">{t.outcome === "win" ? <Badge tone="bull">WIN</Badge> : t.outcome === "loss" ? <Badge tone="bear">LOSS</Badge> : <Badge tone="dim">BE</Badge>}</td>
+                      <td className={cls("px-2 py-2", t.grossR > 0 ? "text-bull-400" : t.grossR < 0 ? "text-bear-400" : "text-fog-300")}>{t.grossR > 0 ? "+" : ""}{t.grossR}R</td>
+                      <td className="px-2 py-2 text-bear-300">−{t.feesR}R</td>
                       <td className={cls("px-2 py-2 font-bold", t.pnlR > 0 ? "text-bull-400" : t.pnlR < 0 ? "text-bear-400" : "text-fog-300")}>{t.pnlR > 0 ? "+" : ""}{t.pnlR}R</td>
                     </tr>
                   ))}
@@ -165,6 +188,21 @@ export function BacktestView(props: {
               </table>
             </div>
           </Card>
+
+          {result.expiryLog.length > 0 && (
+            <Card icon={<IWarn size={15} />} title={`Expired Before Trigger · last ${result.expiryLog.length}`} bodyClass="p-0">
+              <ul className="divide-y divide-ink-600/40">
+                {result.expiryLog.map((x, i) => (
+                  <li key={i} className="flex flex-wrap items-center gap-2 px-4 py-2 font-mono text-[10.5px]">
+                    <span className="text-fog-500">{fmtTime(x.t, result.params.timeframe)}</span>
+                    <Badge tone={x.direction === "Long" ? "bull" : "bear"}>{x.direction.toUpperCase()}</Badge>
+                    <Badge tone="dim">{x.signalType === "sweep" ? "SWEEP" : x.signalType === "structure" ? "BOS" : "ZONE"}</Badge>
+                    <span className="text-gold-400">{x.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
         </>
       )}
 

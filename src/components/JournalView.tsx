@@ -164,7 +164,17 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
               {filtered.map((t) => (
                 <tr key={t.id} className="border-b border-ink-600/40 transition-colors hover:bg-ink-750/60">
                   <td className="px-4 py-2 text-fog-400">{fmtTime(t.createdAt)}</td>
-                  <td className="px-2 py-2 font-bold text-fog-100">{t.symbol}<span className="ml-1 text-[9px] text-fog-500">{t.timeframe}·{t.source.toUpperCase()}</span></td>
+                  <td className="px-2 py-2 font-bold text-fog-100">
+                    {t.symbol}<span className="ml-1 text-[9px] text-fog-500">{t.timeframe}·{t.source.toUpperCase()}</span>
+                    {t.signalType && (
+                      <span
+                        className="mt-0.5 block text-[8.5px] font-normal tracking-wide text-gold-500/90"
+                        title={`Signal generated ${t.signalDisplayIST ?? ""}${t.signalValidTill ? ` · valid till ${new Date(t.signalValidTill).toUTCString()}` : ""}`}
+                      >
+                        {t.signalType.toUpperCase()} SIGNAL · {t.signalDisplayIST ?? "n/a"}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-2 py-2"><Badge tone={t.direction === "Long" ? "bull" : "bear"}>{t.direction === "Long" ? "LONG" : "SHORT"}</Badge></td>
                   <td className="px-2 py-2 text-gold-300">{fmtNum(t.entry, t.entry < 10 ? 5 : 2)}</td>
                   <td className="px-2 py-2 text-bear-400">{fmtNum(t.stopLoss, t.stopLoss < 10 ? 5 : 2)}</td>

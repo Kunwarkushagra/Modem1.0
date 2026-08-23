@@ -1,7 +1,10 @@
+import type { TmVariantId } from "./tmVariant";
+
 export type AssetType = "crypto" | "stock" | "forex";
 export type Timeframe = "5m" | "15m" | "30m" | "1h" | "4h" | "1d";
 export type Bias = "bullish" | "bearish" | "ranging";
 export type Direction = "Long" | "Short";
+export type { TmVariantId };
 
 export interface Candle { t: number; o: number; h: number; l: number; c: number; v: number }
 

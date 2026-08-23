@@ -21,7 +21,26 @@ export const DEFAULT_SETTINGS: Settings = {
   telegramToken: "",
   telegramChatId: "",
   autoRefresh: true,
+  radarSymbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "LINKUSDT", "XRPUSDT"],
+  radarTimeframe: "15m",
+  radarQualityFloor: 55,
+  radarSound: false,
+  radarTmVariant: "scalp10-tm-v1.1.0",
 };
+
+/** Validate + normalise the radar universe: uppercase, trim, dedupe, force USDT/USDC quote for crypto. */
+export function normaliseRadarSymbols(raw: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const token of raw.toUpperCase().split(/[\s,;\n]+/)) {
+    const s = token.replace(/[^A-Z0-9]/g, "");
+    if (s.length < 4 || s.length > 12) continue;
+    let sym = s;
+    if (!/(USDT|USDC|FDUSD)$/.test(sym)) sym = sym + "USDT";
+    if (!seen.has(sym)) { seen.add(sym); out.push(sym); }
+  }
+  return out.slice(0, 14);
+}
 
 export function loadTrades(): Trade[] {
   return loadLS<Trade[]>(K_TRADES, []);

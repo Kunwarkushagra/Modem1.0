@@ -228,6 +228,55 @@ export type TradeSource = "ai" | "manual" | "backtest";
 export type TmMode = "classic" | "tm110";
 export type ExitKind = "target" | "be" | "stop" | "time";
 
+/** Journal exit-reason tag — attached to every closed trade */
+export type ExitReason = "SL" | "TP1" | "TP2" | "BE" | "time-exit" | "invalidation" | "manual";
+
+/* ---------------- Top Setups Radar (display layer only — engine untouched) ---------------- */
+
+export type RadarTf = "5m" | "15m" | "1h";
+
+export interface RadarScoreBreakdown {
+  htfBias: number;          // /20 aligned 20 · ranging 8 · against 0
+  liquidity: number;        // /20 grade A 20 · B 13 · C 7 · none 0, distance penalty up to −4
+  sweep: number;            // /15 trapScore scaled; no sweep evidence → 0
+  structure: number;        // /15 CHoCH 15 · BOS 12 · none 0
+  zone: number;             // /10 grade A 10 · B 7 · none 0
+  session: number;          // /10 LDN/NY overlap 10 · London or NY 7 · Asia 3 · off 0
+  falseBreakout: number;    // /10 confirmed breakout 10 · non-breakout neutral 6
+  total: number;            // 0–100
+}
+
+export type InvalidCheckId = "reclaim" | "mitigation" | "oppositeStructure" | "htfFlip" | "dataStale";
+
+export interface InvalidCheck { id: InvalidCheckId; label: string; hit: boolean; detail: string }
+
+export type RadarStatus = "active" | "invalidated" | "expired";
+
+export interface RadarCandidate {
+  key: string;                    // symbol:setupId
+  symbol: string;
+  assetType: AssetType;
+  timeframe: RadarTf;
+  setup: TradeSetup;
+  score: RadarScoreBreakdown;
+  status: RadarStatus;
+  invalidReason: string | null;
+  invalidChecks: InvalidCheck[];
+  htfBiasAtGeneration: Bias;
+  dataStale: boolean;
+  lastCheckedAt: number;
+  archivedAt: number | null;      // set when moved to Recently Expired
+}
+
+export interface SymbolScanState {
+  symbol: string;
+  status: "idle" | "scanning" | "live" | "stale";
+  lastScanAt: number;
+  lastCloseEpoch: number;         // last setup-TF confirmed close processed
+  lastPrice: number | null;
+  error: string | null;
+}
+
 export interface Trade {
   id: string;
   symbol: string;
@@ -255,6 +304,8 @@ export interface Trade {
   signalGeneratedAt?: number;
   signalDisplayIST?: string;
   signalValidTill?: number;
+  /** why the trade ended — tagged on every closed trade */
+  exitReason?: ExitReason | null;
 }
 
 export interface AlertRule {
@@ -278,6 +329,12 @@ export interface Settings {
   telegramToken: string;
   telegramChatId: string;
   autoRefresh: boolean;
+  /* ---- Top Setups Radar (display layer) ---- */
+  radarSymbols: string[];
+  radarTimeframe: RadarTf;
+  radarQualityFloor: number;   // 0–100, default 55
+  radarSound: boolean;
+  radarTmVariant: TmVariantId; // which management variant the radar cards describe
 }
 
 export interface BacktestTrade {

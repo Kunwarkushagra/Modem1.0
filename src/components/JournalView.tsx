@@ -1,9 +1,12 @@
 import { useMemo, useState } from "react";
-import type { AssetType, Direction, Trade, TradeOutcome } from "../lib/types";
+import type { AssetType, Direction, ExitReason, Trade, TradeOutcome } from "../lib/types";
 import { addTrade, deleteTrade, updateTrade } from "../lib/journal";
 import { computePerformance } from "../lib/performance";
 import { fmtNum, fmtPct, fmtTime, cls } from "../lib/utils";
 import { Badge, Btn, Card, IBook, ICheck, IPlus, Modal, PctCell, Segmented, SparkLine, Stat, useToast } from "./ui";
+
+const EXIT_REASONS: ExitReason[] = ["SL", "TP1", "TP2", "BE", "time-exit", "invalidation", "manual"];
+const defaultReason = (o: TradeOutcome): ExitReason => (o === "win" ? "TP1" : o === "loss" ? "SL" : "BE");
 
 function pnlOf(t: { direction: Direction; entry: number; stopLoss: number; tp1: number }, exit: number, outcome: TradeOutcome) {
   const dir = t.direction === "Long" ? 1 : -1;
@@ -22,7 +25,7 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
   const [fDir, setFDir] = useState<"all" | Direction>("all");
   const [fOutcome, setFOutcome] = useState<"all" | "open" | TradeOutcome>("all");
   const [closing, setClosing] = useState<Trade | null>(null);
-  const [closeForm, setCloseForm] = useState({ outcome: "win" as TradeOutcome, exit: "", notes: "" });
+  const [closeForm, setCloseForm] = useState({ outcome: "win" as TradeOutcome, exit: "", notes: "", exitReason: "TP1" as ExitReason });
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
 
@@ -46,6 +49,7 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
       pnlPct: closeForm.outcome === "breakeven" ? 0 : pnlPct,
       pnlR: closeForm.outcome === "breakeven" ? 0 : pnlR,
       closedAt: Date.now(), notes: closeForm.notes,
+      exitReason: closeForm.exitReason,
     });
     props.onChanged();
     setClosing(null);
@@ -153,13 +157,14 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
                 <th className="px-2 py-2 font-medium">RR</th>
                 <th className="px-2 py-2 font-medium">CONFLUENCES</th>
                 <th className="px-2 py-2 font-medium">RESULT</th>
+                <th className="px-2 py-2 font-medium">EXIT</th>
                 <th className="px-2 py-2 font-medium">PNL</th>
                 <th className="px-2 py-2" />
               </tr>
             </thead>
             <tbody>
               {filtered.length === 0 && (
-                <tr><td colSpan={11} className="px-4 py-10 text-center text-fog-500">No trades match. Take a validated setup from the terminal or log one manually.</td></tr>
+                <tr><td colSpan={12} className="px-4 py-10 text-center text-fog-500">No trades match. Take a validated setup from the terminal or log one manually.</td></tr>
               )}
               {filtered.map((t) => (
                 <tr key={t.id} className="border-b border-ink-600/40 transition-colors hover:bg-ink-750/60">
@@ -182,10 +187,13 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
                   <td className="px-2 py-2 text-fog-200">{t.rr.toFixed(1)}</td>
                   <td className="max-w-[180px] truncate px-2 py-2 text-fog-400" title={t.confluences.join(", ")}>{t.confluences.join(", ")}</td>
                   <td className="px-2 py-2">{outcomeBadge(t)}</td>
+                  <td className="px-2 py-2">{t.status === "closed" && t.exitReason
+                    ? <Badge tone={t.exitReason === "invalidation" ? "bear" : t.exitReason === "SL" ? "bear" : t.exitReason === "manual" ? "dim" : "info"}>{t.exitReason}</Badge>
+                    : <span className="text-fog-500">—</span>}</td>
                   <td className="px-2 py-2"><PctCell v={t.pnlPct} />{t.pnlR != null && t.status === "closed" && <span className="ml-1 text-[9px] text-fog-500">{t.pnlR > 0 ? "+" : ""}{t.pnlR}R</span>}</td>
                   <td className="px-2 py-2">
                     <div className="flex gap-1">
-                      {t.status === "pending" && <Btn size="xs" variant="success" onClick={() => { setClosing(t); setCloseForm({ outcome: "win", exit: String(t.tp1), notes: "" }); }}><ICheck size={11} /> CLOSE</Btn>}
+                      {t.status === "pending" && <Btn size="xs" variant="success" onClick={() => { setClosing(t); setCloseForm({ outcome: "win", exit: String(t.tp1), notes: "", exitReason: "TP1" }); }}><ICheck size={11} /> CLOSE</Btn>}
                       <Btn size="xs" variant="ghost" title="Delete" onClick={() => { deleteTrade(t.id); props.onChanged(); toast.push("info", `${t.symbol} trade deleted`); }}><ITrash size={11} /></Btn>
                     </div>
                   </td>
@@ -202,7 +210,7 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
           <div className="space-y-3">
             <div className="grid grid-cols-3 gap-2">
               {(["win", "loss", "breakeven"] as TradeOutcome[]).map((o) => (
-                <button key={o} type="button" onClick={() => setCloseForm((f) => ({ ...f, outcome: o }))}
+                <button key={o} type="button" onClick={() => setCloseForm((f) => ({ ...f, outcome: o, exitReason: defaultReason(o) }))}
                   className={cls("tv-btn rounded-md border px-3 py-2.5 font-mono text-xs font-bold uppercase",
                     closeForm.outcome === o
                       ? o === "win" ? "border-bull-600 bg-bull-500/15 text-bull-300" : o === "loss" ? "border-bear-600 bg-bear-500/15 text-bear-300" : "border-ink-400 bg-ink-600/40 text-fog-100"
@@ -210,6 +218,18 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
                   {o}
                 </button>
               ))}
+            </div>
+            <div>
+              <span className="mb-1 block font-mono text-[10px] tracking-widest text-fog-500">EXIT REASON (how did it end?)</span>
+              <div className="flex flex-wrap gap-1.5">
+                {EXIT_REASONS.map((r) => (
+                  <button key={r} type="button" onClick={() => setCloseForm((f) => ({ ...f, exitReason: r }))}
+                    className={cls("tv-btn rounded border px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-wider",
+                      closeForm.exitReason === r ? "border-gold-600 bg-gold-500/15 text-gold-300" : "border-ink-600 text-fog-400 hover:text-fog-200")}>
+                    {r}
+                  </button>
+                ))}
+              </div>
             </div>
             <label className="block">
               <span className="mb-1 block font-mono text-[10px] tracking-widest text-fog-500">EXIT PRICE</span>

@@ -8,6 +8,8 @@ import { analyzeSMC } from "./smc";
 import { deriveBias, localSetups, validateSetup } from "./ai";
 import type { EngineCtx } from "./ai";
 import { TF_MINUTES } from "./utils";
+import { variantById } from "./tmVariant";
+import type { TmVariantId } from "./tmVariant";
 
 type Log = (msg: string, kind?: "info" | "ok" | "warn" | "err") => void;
 
@@ -59,6 +61,7 @@ export async function runBacktestOnCandles(
   log: Log,
   onProgress?: (pct: number) => void,
   dataSource = "cache",
+  advQuality = false,
 ): Promise<BacktestResult> {
   const t0 = performance.now();
   const stepMs = TF_MINUTES[params.timeframe] * 60_000;
@@ -265,7 +268,7 @@ export async function runBacktestOnCandles(
     if (i <= cooldownUntil || (i - lookback) % step !== 0) continue;
     const window = candles.slice(0, i + 1);
     const ind = computeIndicators(window);
-    const smc = analyzeSMC(window);
+    const smc = analyzeSMC(window, advQuality); // adv v1.2.0 soft layers ride the same entry pipeline
     const bias = deriveBias(smc, ind, window);
     const generatedAt = c.t + stepMs;
     const ctx: EngineCtx = {
@@ -358,13 +361,14 @@ export async function runBacktestOnCandles(
   };
 }
 
-/** Convenience wrapper: fetch history, then run the core engine. */
+/** Convenience wrapper: fetch history, then run the core engine for a specific variant. */
 export async function runBacktest(
   params: BacktestParams,
   log: Log,
   onProgress?: (pct: number) => void,
-  tmMode: TmMode = "classic",
+  variantId: TmVariantId = "baseline-v1.0.0",
 ): Promise<BacktestResult> {
+  const def = variantById(variantId);
   const hist = await fetchHistory(params.symbol, params.assetType, params.timeframe, params.days, log);
-  return runBacktestOnCandles(hist.candles, params, tmMode, log, onProgress, hist.source);
+  return runBacktestOnCandles(hist.candles, params, def.mode, log, onProgress, hist.source, def.advQuality);
 }

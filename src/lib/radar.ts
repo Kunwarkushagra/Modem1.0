@@ -47,10 +47,14 @@ export function scoreCandidate(setup: TradeSetup, htfBias: Bias, generatedAt: nu
   const overlap = h >= 12 && h < 16; // London close × New York open killzone
   const sessionScore = overlap ? 10 : sess.name === "London" || sess.name === "New York" ? 7 : sess.name === "Asia" ? 3 : 0;
 
-  const falseBreakoutScore = setup.isBreakout ? 10 : 6; // confirmed breakouts max out; non-breakouts take the neutral line
+  // adv v1.2.0 false-breakout granularity: breakout 10 · fakeout-reversal 10 · liquidity sweep 7 · neutral 6
+  const falseBreakoutScore = setup.isBreakout ? 10 : r?.sweep?.fakeoutReversal ? 10 : r?.sweep ? 7 : 6;
 
-  const total = Math.max(0, Math.min(100, htfBiasScore + liquidityScore + sweepScore + structureScore + zoneScore + sessionScore + falseBreakoutScore));
-  return { htfBias: htfBiasScore, liquidity: liquidityScore, sweep: sweepScore, structure: structureScore, zone: zoneScore, session: sessionScore, falseBreakout: falseBreakoutScore, total };
+  // adv v1.2.0 AMD bonus: manipulation phase (20-bar range ≤ 2×ATR swept) adds +5, total capped at 100
+  const amdScore = r?.amdPhase === "Manipulation" ? 5 : 0;
+
+  const total = Math.max(0, Math.min(100, htfBiasScore + liquidityScore + sweepScore + structureScore + zoneScore + sessionScore + falseBreakoutScore + amdScore));
+  return { htfBias: htfBiasScore, liquidity: liquidityScore, sweep: sweepScore, structure: structureScore, zone: zoneScore, session: sessionScore, falseBreakout: falseBreakoutScore, amd: amdScore, total };
 }
 
 /* ------------------------------------------------ per-symbol scan (confirmed candles only) */
@@ -64,7 +68,7 @@ export interface ScanOutcome {
 
 const EMPTY_FUNNEL: ScanFunnel = { generated: 0, passedGates: 0, passedFloor: 0 };
 
-export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: number): Promise<ScanOutcome> {
+export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: number, advQuality = false): Promise<ScanOutcome> {
   const symbol = normSymbol(symbolRaw, "crypto");
   const asset: AssetType = "crypto";
   const base: SymbolScanState = { symbol, status: "scanning", lastScanAt: Date.now(), lastCloseEpoch: 0, lastPrice: null, error: null, candidatesFound: 0 };
@@ -120,9 +124,9 @@ export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: n
   const generatedAt = last(stfC).t + stepMs;
 
   const ind = computeIndicators(stfC);
-  const smc = analyzeSMC(stfC);
+  const smc = analyzeSMC(stfC, advQuality);
   const htfInd = computeIndicators(htfCD);
-  const htfSmc = analyzeSMC(htfCD);
+  const htfSmc = analyzeSMC(htfCD, advQuality);
   const htfBias = deriveBias(htfSmc, htfInd, htfCD);
 
   const ctx: EngineCtx = {

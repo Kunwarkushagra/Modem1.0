@@ -1,10 +1,11 @@
 import type {
   BacktestTrade, BenchReport, BenchSegment, BenchWindowReport, BenchWindowSpec, SegmentStats,
-  ThresholdCheck, TmMode,
+  ThresholdCheck,
 } from "./types";
 import { fetchHistory } from "./marketData";
 import { runBacktestOnCandles } from "./backtest";
-import { MIN_VAL_TRADES, PASS_THRESHOLDS, TM_VARIANTS } from "./tmVariant";
+import { BASELINE_VARIANT, MIN_VAL_TRADES, PASS_THRESHOLDS, TEST_VARIANT, TM_VARIANTS } from "./tmVariant";
+import type { TmVariantId } from "./tmVariant";
 import { loadLS, saveLS, TF_MINUTES } from "./utils";
 
 type Log = (msg: string, kind?: "info" | "ok" | "warn" | "err") => void;
@@ -124,7 +125,7 @@ async function runBenchWindow(
   const tEnd = candles[candles.length - 1].t + stepMs;
   log(`window ${w.label}: ${candles.length} candles from ${hist.source} — both variants run on this exact series`, "ok");
 
-  const segments = {} as Record<TmMode, SegmentStats[]>;
+  const segments = {} as Record<TmVariantId, SegmentStats[]>;
   for (const v of TM_VARIANTS) {
     const res = await runBacktestOnCandles(
       candles,
@@ -133,17 +134,19 @@ async function runBenchWindow(
       log,
       (p) => onRunProgress?.(p),
       hist.source,
+      v.advQuality,
     );
     const split = splitTrades(res.trades, t0ts, tEnd);
-    segments[v.mode] = SEG_ORDER.map((seg) => computeSegmentStats(seg, split[seg], w.days * (seg === "CAL" ? 0.6 : 0.2)));
+    segments[v.id] = SEG_ORDER.map((seg) => computeSegmentStats(seg, split[seg], w.days * (seg === "CAL" ? 0.6 : 0.2)));
   }
 
-  const vVal = segments.tm110[1];
-  const bVal = segments.classic[1];
+  // variant under test = newest (ADV v1.2.0); reference = BASELINE v1.0.0
+  const vVal = segments[TEST_VARIANT.id][1];
+  const bVal = segments[BASELINE_VARIANT.id][1];
   const { checks, verdict } = evaluateThresholds(vVal, bVal);
 
   log(
-    `window ${w.label}: VAL net/t baseline ${bVal.netPerTrade.toFixed(3)} vs tm110 ${vVal.netPerTrade.toFixed(3)} → ${verdict}` +
+    `window ${w.label}: VAL net/t ${BASELINE_VARIANT.short} ${bVal.netPerTrade.toFixed(3)} vs ${TEST_VARIANT.short} ${vVal.netPerTrade.toFixed(3)} → ${verdict}` +
       (verdict === "INSUFFICIENT" ? ` (VAL sample ${vVal.trades} < ${MIN_VAL_TRADES} — NO CONCLUSION)` : ""),
     verdict === "FAIL" ? "warn" : "info",
   );

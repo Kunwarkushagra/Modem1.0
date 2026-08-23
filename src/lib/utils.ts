@@ -71,11 +71,16 @@ export function fmtIST(ts: number): string {
 
 export interface SessionInfo { name: "Asia" | "London" | "New York" | "Off-session"; bonus: number }
 
+/**
+ * Sessions defined directly in IST (Asia/Kolkata = UTC+5:30) — adv v1.2.0 mapping.
+ * Asia 07:00–13:30 IST · London 13:30–16:30 IST · New York 19:00–22:00 IST · rest off.
+ */
 export function detectSession(ts: number): SessionInfo {
-  const h = new Date(ts).getUTCHours();
-  if (h >= 0 && h < 7) return { name: "Asia", bonus: 0 };
-  if (h >= 7 && h < 12) return { name: "London", bonus: 2 };
-  if (h >= 12 && h < 21) return { name: "New York", bonus: 2 };
+  const d = new Date(ts);
+  const ist = (d.getUTCHours() * 60 + d.getUTCMinutes() + 330) % 1440;
+  if (ist >= 420 && ist < 810) return { name: "Asia", bonus: 0 };
+  if (ist >= 810 && ist < 990) return { name: "London", bonus: 2 };
+  if (ist >= 1140 && ist < 1320) return { name: "New York", bonus: 2 };
   return { name: "Off-session", bonus: -2 };
 }
 

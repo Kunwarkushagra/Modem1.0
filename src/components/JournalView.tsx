@@ -193,13 +193,14 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
                 <th className="px-2 py-2 font-medium">RESULT</th>
                 <th className="px-2 py-2 font-medium">EXIT</th>
                 <th className="px-2 py-2 font-medium">INSIGHT</th>
+                <th className="px-2 py-2 font-medium">CHART</th>
                 <th className="px-2 py-2 font-medium">PNL</th>
                 <th className="px-2 py-2" />
               </tr>
             </thead>
             <tbody>
               {filtered.length === 0 && (
-                <tr><td colSpan={13} className="px-4 py-10 text-center text-fog-500">No trades match. Take a validated setup from the terminal or log one manually.</td></tr>
+                <tr><td colSpan={14} className="px-4 py-10 text-center text-fog-500">No trades match. Take a validated setup from the terminal or log one manually.</td></tr>
               )}
               {filtered.map((t) => (
                 <tr key={t.id} className="border-b border-ink-600/40 transition-colors hover:bg-ink-750/60">
@@ -226,6 +227,7 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
                     ? <Badge tone={t.exitReason === "invalidation" ? "bear" : t.exitReason === "SL" ? "bear" : t.exitReason === "manual" ? "dim" : "info"}>{t.exitReason}</Badge>
                     : <span className="text-fog-500">—</span>}</td>
                   <td className="px-2 py-2">{stanceBadge(t.insightStance)}</td>
+                  <td className="px-2 py-2" title="AI Chart Review agreement at log time (— if chart review wasn't used)">{stanceBadge(t.chartAgreement)}</td>
                   <td className="px-2 py-2"><PctCell v={t.pnlPct} />{t.pnlR != null && t.status === "closed" && <span className="ml-1 text-[9px] text-fog-500">{t.pnlR > 0 ? "+" : ""}{t.pnlR}R</span>}</td>
                   <td className="px-2 py-2">
                     <div className="flex gap-1">

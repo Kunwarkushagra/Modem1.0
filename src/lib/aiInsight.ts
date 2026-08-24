@@ -117,36 +117,93 @@ function parseGeminiText(text: string): unknown {
 
 /* ---------------- transport ---------------- */
 
-async function callGeminiDirect(payload: AiInsightPayload, key: string, model: string): Promise<unknown> {
-  const res = await fetch(GEMINI_ENDPOINT(model || "gemini-2.0-flash", key), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: INSIGHT_INSTRUCTION + "\n\nSIGNAL PAYLOAD (JSON):\n" + JSON.stringify(payload) }] }],
-      generationConfig: { temperature: 0.2, responseMimeType: "application/json" },
-    }),
-  });
-  if (res.status === 429) throw Object.assign(new Error("rate-limited (429)"), { status: 429 });
-  if (res.status >= 500) throw Object.assign(new Error(`server error (${res.status})`), { status: res.status });
-  if (!res.ok) throw Object.assign(new Error(`gemini ${res.status}`), { status: res.status });
+const DEFAULT_MODEL = "gemini-2.0-flash";
+const FALLBACK_MODEL = "gemini-1.5-flash"; // auto-retry target on 404 MODEL_NOT_FOUND
+
+/** Typed transport error: exact HTTP status + machine-readable code for the debug chip. */
+class AiCallError extends Error {
+  status: number | null; // null = network/parse failure (no HTTP round trip completed)
+  code: string;          // e.g. MODEL_NOT_FOUND, API_KEY_INVALID, RESOURCE_EXHAUSTED, NETWORK ERROR
+  constructor(status: number | null, code: string, detail?: string) {
+    super(detail ?? `${status ?? "NET"} ${code}`);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** Exact failure chip text: "404 MODEL_NOT_FOUND", "400 API_KEY_INVALID", "NETWORK ERROR"… */
+function failChip(e: unknown): string {
+  if (e instanceof AiCallError) return e.status != null ? `${e.status} ${e.code}` : e.code;
+  return "ERROR " + (e instanceof Error ? e.message.slice(0, 48) : "UNKNOWN");
+}
+
+async function geminiOnce(payload: AiInsightPayload, key: string, model: string): Promise<unknown> {
+  let res: Response;
+  try {
+    res = await fetch(GEMINI_ENDPOINT(model, key), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: INSIGHT_INSTRUCTION + "\n\nSIGNAL PAYLOAD (JSON):\n" + JSON.stringify(payload) }] }],
+        generationConfig: { temperature: 0.2, responseMimeType: "application/json" },
+      }),
+    });
+  } catch {
+    throw new AiCallError(null, "NETWORK ERROR"); // fetch rejected — offline/CORS/DNS
+  }
+  if (!res.ok) {
+    // Gemini error body: {"error":{"code":404,"message":"…","status":"MODEL_NOT_FOUND"}}
+    let code = (res.statusText || "HTTP_ERROR").toUpperCase().replace(/[\s-]+/g, "_");
+    let msg = "";
+    try {
+      const j = (await res.json()) as { error?: { status?: string; message?: string } };
+      if (j.error?.status) code = j.error.status.toUpperCase().replace(/[\s-]+/g, "_");
+      msg = j.error?.message ?? "";
+    } catch { /* non-JSON error body */ }
+    console.warn(`[ai-insight] ${model} → HTTP ${res.status} ${code}${msg ? ` — ${msg.slice(0, 140)}` : ""}`);
+    throw new AiCallError(res.status, code, msg || undefined);
+  }
   const j = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
   const text = j.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
-  if (!text) throw new Error("empty model response");
+  if (!text) throw new AiCallError(200, "EMPTY_RESPONSE");
   return parseGeminiText(text);
 }
 
+/**
+ * Browser fallback call. Endpoint is the documented v1beta shape:
+ * POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=<key>
+ * On 404 (MODEL_NOT_FOUND / retired model) it auto-retries once with gemini-1.5-flash.
+ */
+async function callGeminiDirect(payload: AiInsightPayload, key: string, model: string): Promise<unknown> {
+  const primary = model || DEFAULT_MODEL;
+  try {
+    return await geminiOnce(payload, key, primary);
+  } catch (e) {
+    if (e instanceof AiCallError && e.status === 404 && primary !== FALLBACK_MODEL) {
+      console.info(`[ai-insight] ${primary} unavailable (404 ${e.code}) — auto-fallback → ${FALLBACK_MODEL}`);
+      return await geminiOnce(payload, key, FALLBACK_MODEL);
+    }
+    throw e;
+  }
+}
+
 async function callServerRoute(payload: AiInsightPayload): Promise<unknown> {
-  const res = await fetch("/api/ai-insight", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  let res: Response;
+  try {
+    res = await fetch("/api/ai-insight", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    throw new AiCallError(null, "NETWORK ERROR");
+  }
   const isJson = (res.headers.get("content-type") ?? "").includes("application/json");
-  if (!isJson) throw new Error("no server route"); // static host served index.html
-  if (res.status === 403) throw Object.assign(new Error("no-key"), { status: 403 });
-  if (res.status === 429) throw Object.assign(new Error("rate-limited (429)"), { status: 429 });
-  if (res.status >= 500) throw Object.assign(new Error(`server error (${res.status})`), { status: res.status });
-  if (!res.ok) throw Object.assign(new Error(`route ${res.status}`), { status: res.status });
+  if (!isJson) throw new Error("no server route"); // static host served index.html — fall through to local key
+  if (!res.ok) {
+    const code = res.status === 403 ? "NO_KEY" : res.status === 429 ? "RATE_LIMITED" : res.status >= 500 ? "SERVER_ERROR" : `HTTP_${res.status}`;
+    throw new AiCallError(res.status, code);
+  }
   return await res.json();
 }
 
@@ -174,30 +231,30 @@ export function requestInsight(
       }
     } catch { /* fall through */ }
 
-    // 2) server route (env-held key), then local-key fallback
+    // 2) server route (env-held key), then local-key fallback.
+    //    Failures surface as EXACT debug chips ("404 MODEL_NOT_FOUND", "429 RATE_LIMITED",
+    //    "NETWORK ERROR"…) — never a generic message — and never block the card.
     let parsed: unknown = null;
     let source: AiInsightResult["source"] = "server";
     try {
       parsed = await callServerRoute(payload);
     } catch (e) {
-      const status = (e as { status?: number })?.status;
+      const status = e instanceof AiCallError ? e.status : undefined;
       if (status === 429 || (status != null && status >= 500)) {
-        return { unavailable: "AI UNAVAILABLE — retry later" };
+        return { unavailable: failChip(e) }; // e.g. "429 RATE_LIMITED" · "502 SERVER_ERROR"
       }
       if (status === 403 && !opts.localKey) {
-        return { unavailable: "AI DISABLED — no key" };
+        return { unavailable: "403 NO_KEY — AI DISABLED" };
       }
       if (!opts.localKey) {
-        return { unavailable: status === 403 ? "AI DISABLED — no key" : "AI DISABLED — no key (add one in Settings, or deploy /api/ai-insight)" };
+        return { unavailable: "AI DISABLED — NO KEY (add one in Settings, or deploy /api/ai-insight)" };
       }
       try {
         parsed = await callGeminiDirect(payload, opts.localKey, opts.model);
         source = "local";
       } catch (e2) {
-        const s2 = (e2 as { status?: number })?.status;
-        if (s2 === 429 || (s2 != null && s2 >= 500)) return { unavailable: "AI UNAVAILABLE — retry later" };
-        console.error("[ai-insight] call failed —", e2);
-        return { unavailable: "AI UNAVAILABLE — retry later" };
+        console.error(`[ai-insight] ${payload.symbol} insight failed —`, e2 instanceof Error ? e2.message : e2);
+        return { unavailable: failChip(e2) }; // e.g. "404 MODEL_NOT_FOUND" · "400 API_KEY_INVALID" · "429 RESOURCE_EXHAUSTED" · "NETWORK ERROR"
       }
     }
 

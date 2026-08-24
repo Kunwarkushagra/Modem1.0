@@ -261,14 +261,6 @@ export interface RawUniverseEntry {
   changePct: number;   // 24h price change %
 }
 
-/**
- * Sighting roster: how many CONSECUTIVE 6h top-30 refreshes each symbol has
- * appeared in. A symbol is scannable only at ≥ 2 consecutive sightings
- * ("NEW — WARMING UP" until then). Dropping out of the list resets the count.
- */
-export interface RosterEntry { consecutive: number; firstSeenAt: number; lastSeenAt: number }
-export type Roster = Record<string, RosterEntry>;
-
 export interface RadarScoreBreakdown {
   htfBias: number;          // /20 aligned 20 · ranging 8 · against 0
   liquidity: number;        // /20 grade A 20 · B 13 · C 7 · none 0, distance penalty up to −4
@@ -434,11 +426,16 @@ export interface Settings {
   aiInsightEnabled: boolean;
   geminiApiKey: string;         // static-build fallback only; stays in this browser, never logged
   geminiModel: string;          // default gemini-2.0-flash
-  /* ---- Universe hygiene guards v2 (data-level, pre-scan; user-tunable, never auto-tuned) ---- */
-  universeExtraExcludes: string;   // comma-separated extra bases on top of the hard stablecoin list
-  universeMinQuoteVolume: number;  // 24h quote-volume floor, USDT (default 50M)
-  universeVolFloorPct: number;     // 24h high-low range floor, % (default 1.5)
-  universeChangeCapPct: number;    // |24h change| cap, % (default 25)
+  /* ---- Universe hygiene guards (data-level, pre-scan; user-tunable, never auto-tuned) ----
+     Exclusions = stablecoins ONLY by default (hard list + extras). The numeric guards are
+     OPTIONAL toggles — DEFAULT OFF — retained so they can be re-enabled later. No warm-up gating. */
+  universeExtraExcludes: string;          // comma-separated extra bases on top of the hard stablecoin list
+  universeMinQuoteVolumeEnabled: boolean; // opt-in: 24h quote-volume floor (default off)
+  universeMinQuoteVolume: number;         // floor value, USDT (default 50M)
+  universeVolFloorEnabled: boolean;       // opt-in: 24h high-low range floor (default off)
+  universeVolFloorPct: number;            // floor value, % (default 1.5)
+  universeChangeCapEnabled: boolean;      // opt-in: |24h change| cap (default off)
+  universeChangeCapPct: number;           // cap value, % (default 25)
 }
 
 export interface BacktestTrade {

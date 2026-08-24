@@ -33,8 +33,11 @@ export const DEFAULT_SETTINGS: Settings = {
   geminiApiKey: "",
   geminiModel: "gemini-2.0-flash",
   universeExtraExcludes: "",
+  universeMinQuoteVolumeEnabled: false,
   universeMinQuoteVolume: 50_000_000,
+  universeVolFloorEnabled: false,
   universeVolFloorPct: 1.5,
+  universeChangeCapEnabled: false,
   universeChangeCapPct: 25,
 };
 

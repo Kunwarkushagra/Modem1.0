@@ -2,13 +2,14 @@ import type {
   BacktestTrade, BenchReport, BenchSegment, BenchWindowReport, BenchWindowSpec, RunnerSmokeReport,
   SegmentStats, SmokeArm, ThresholdCheck, Timeframe,
 } from "./types";
-import { contaminationNotice, describeConfig, describeRunnerConfig, RUNNER_SMOKE, SMOKE_CONFIG } from "./benchConfig";
-import type { PhaseConfig } from "./benchConfig";
+import { contaminationNotice, COURSEEDGE_SMOKE, describeConfig, describeVariantSmoke, RUNNER_SMOKE, SMOKE_CONFIG } from "./benchConfig";
+import type { PhaseConfig, VariantSmokeConfig } from "./benchConfig";
 import { fetchHistory } from "./marketData";
-import { runBacktestOnCandles } from "./backtest";
-import { BASELINE_VARIANT, freqFloor, LS_BENCH_KEY, LS_RUNNER_KEY, MIN_VAL_TRADES, PASS_THRESHOLDS, TEST_VARIANT, TM_VARIANTS, variantById } from "./tmVariant";
+import { collectEngineSetups, runBacktestOnCandles } from "./backtest";
+import { scoreCourseEdge } from "./courseEdge";
+import { BASELINE_VARIANT, freqFloor, LS_BENCH_KEY, LS_COURSEEDGE_KEY, LS_RUNNER_KEY, MIN_VAL_TRADES, PASS_THRESHOLDS, TEST_VARIANT, TM_VARIANTS, variantById } from "./tmVariant";
 import type { TmVariantId } from "./tmVariant";
-import { loadLS, saveLS, TF_MINUTES } from "./utils";
+import { last, loadLS, saveLS, TF_MINUTES } from "./utils";
 
 type Log = (msg: string, kind?: "info" | "ok" | "warn" | "err") => void;
 

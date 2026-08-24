@@ -179,17 +179,19 @@ export async function fetchHistory(
   days: number,
   log?: (msg: string, kind?: "info" | "ok" | "warn" | "err") => void,
   maxCandles = 1600,
+  /** frozen window anchor (epoch ms). When set, history ends AT this instant — reproducible benches. */
+  endTs?: number,
 ): Promise<FetchResult> {
   const symbol = normSymbol(rawSymbol, asset);
   const need = Math.min(Math.ceil((days * 1440) / TF_MINUTES[tf]) + 220, maxCandles);
+  const anchor = endTs ?? Date.now();
 
   if (asset === "crypto") {
     try {
-      log?.(`history ${symbol} ${tf} ← Binance (${days}d)…`);
+      log?.(`history ${symbol} ${tf} ← Binance (${days}d${endTs ? " · frozen anchor" : ""})…`);
       const stepMs = TF_MINUTES[tf] * 60_000;
-      const end = Date.now();
       const collected: Candle[] = [];
-      let cursor = end;
+      let cursor = anchor;
       while (collected.length < need) {
         const chunk = await binanceFetch(symbol, tf, 1000, cursor - 1);
         if (!chunk.length) break;
@@ -197,8 +199,8 @@ export async function fetchHistory(
         cursor = chunk[0].t - stepMs;
         if (chunk.length < 500) break;
       }
-      const cutoff = end - days * 86_400_000 - 220 * stepMs;
-      const trimmed = collected.filter((c) => c.t >= cutoff);
+      const cutoff = anchor - days * 86_400_000 - 220 * stepMs;
+      const trimmed = collected.filter((c) => c.t >= cutoff && c.t <= anchor);
       if (trimmed.length >= 260) {
         log?.(`Binance history: ${trimmed.length} candles ✓`, "ok");
         return { candles: sliceTail(trimmed, need), source: "Binance", simulated: false };
@@ -209,7 +211,9 @@ export async function fetchHistory(
     }
   }
   // non-crypto or crypto fallback: use standard 300-candle fetch window (covers range per timeframe)
-  return fetchCandles(symbol, asset, tf, Math.min(need, asset === "crypto" ? 1000 : 300), log);
+  const fb = await fetchCandles(symbol, asset, tf, Math.min(need, asset === "crypto" ? 1000 : 300), log);
+  if (endTs != null) fb.candles = fb.candles.filter((c) => c.t <= anchor);
+  return fb;
 }
 
 export async function fetchLastPrice(rawSymbol: string, asset: AssetType, tf: Timeframe): Promise<number | null> {

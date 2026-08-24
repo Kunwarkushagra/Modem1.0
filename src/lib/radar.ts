@@ -18,7 +18,7 @@ const EMPTY_PERF: PerformanceSummary = {
 
 /* ------------------------------------------------ scoring (Σ = 100) */
 
-export function scoreCandidate(setup: TradeSetup, htfBias: Bias, generatedAt: number): RadarScoreBreakdown {
+export function scoreCandidate(setup: TradeSetup, htfBias: Bias, generatedAt: number, eff2 = false): RadarScoreBreakdown {
   const r = setup.reasoning;
   const dir = setup.direction;
 
@@ -54,7 +54,22 @@ export function scoreCandidate(setup: TradeSetup, htfBias: Bias, generatedAt: nu
   const amdScore = r?.amdPhase === "Manipulation" ? 5 : 0;
 
   const total = Math.max(0, Math.min(100, htfBiasScore + liquidityScore + sweepScore + structureScore + zoneScore + sessionScore + falseBreakoutScore + amdScore));
-  return { htfBias: htfBiasScore, liquidity: liquidityScore, sweep: sweepScore, structure: structureScore, zone: zoneScore, session: sessionScore, falseBreakout: falseBreakoutScore, amd: amdScore, total };
+
+  /* eff2-slg v1.0.0 (Part A) — POSITIVE-ONLY ranking boosts, cap +15. No penalties, no vetoes.
+   * `total` (base) is unchanged so radar floors stay frequency-neutral; only `ranked` ordering improves. */
+  let eff2Boost = 0;
+  if (eff2) {
+    if (r?.sweep && r.sweep.reclaimStrengthAtr != null && r.sweep.reclaimStrengthAtr >= 0.2) eff2Boost += 5; // reclaim strength
+    if (r?.sweep?.dryUp) eff2Boost += 5;                                                                      // volume dry-up
+    if (sess.name === "London" || sess.name === "New York") eff2Boost += 5;                                   // session
+    if (htfBiasScore === 20) eff2Boost += 5;                                                                  // HTF alignment
+    if (r?.sweep && r.sweep.displacementAtr >= 1.2) eff2Boost += 5;                                           // displacement quality
+    if (r?.liquidity && (r.liquidity.significance ?? 0) >= 60) eff2Boost += 5;                                // pool significance
+    if (r?.sweep?.reclaimFast) eff2Boost += 3;                                                                // reclaim speed (Part B rule 3)
+    eff2Boost = Math.min(15, eff2Boost);
+  }
+  const ranked = Math.min(100, total + eff2Boost);
+  return { htfBias: htfBiasScore, liquidity: liquidityScore, sweep: sweepScore, structure: structureScore, zone: zoneScore, session: sessionScore, falseBreakout: falseBreakoutScore, amd: amdScore, total, eff2: eff2Boost, ranked };
 }
 
 /* ------------------------------------------------ per-symbol scan (confirmed candles only) */
@@ -68,7 +83,7 @@ export interface ScanOutcome {
 
 const EMPTY_FUNNEL: ScanFunnel = { generated: 0, passedGates: 0, passedFloor: 0 };
 
-export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: number, advQuality = false): Promise<ScanOutcome> {
+export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: number, advQuality = false, eff2 = false): Promise<ScanOutcome> {
   const symbol = normSymbol(symbolRaw, "crypto");
   const asset: AssetType = "crypto";
   const base: SymbolScanState = { symbol, status: "scanning", lastScanAt: Date.now(), lastCloseEpoch: 0, lastPrice: null, error: null, candidatesFound: 0 };
@@ -148,7 +163,7 @@ export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: n
     }
     funnel.passedGates++;
     if (!setup.signal) continue;
-    const score = scoreCandidate(setup, htfBias, generatedAt);
+    const score = scoreCandidate(setup, htfBias, generatedAt, eff2);
     if (score.total < qualityFloor) {                                // quality floor (Settings)
       console.info(`[radar] ${symbol}: candidate below floor (${score.total} < ${qualityFloor})`);
       continue;
@@ -191,6 +206,7 @@ export async function scanUniverse(
   tf: RadarTf,
   qualityFloor: number,
   advQuality: boolean,
+  eff2: boolean,
   onResult: (res: ScanOutcome) => void,
   onProgress: (p: BatchProgress) => void,
   onFail: (symbol: string, msg: string) => void,
@@ -206,7 +222,7 @@ export async function scanUniverse(
       const sym = symbols[my];
       onProgress({ done, total: symbols.length, current: sym });
       try {
-        const res = await scanSymbol(sym, tf, qualityFloor, advQuality);
+        const res = await scanSymbol(sym, tf, qualityFloor, advQuality, eff2);
         ok++;
         onResult(res);
       } catch (e) {

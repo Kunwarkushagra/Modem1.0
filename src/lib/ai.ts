@@ -354,7 +354,10 @@ function buildReasoning(
     const dryUp = sweepEvent?.dryUp === true;
     const base = 40 * Math.min(1, depthAtr / 0.8) + 30 * (reclaim ? 1 : 0.2) + 30 * Math.min(1, displacementAtr / 1.2);
     const trapScore = Math.round(Math.min(100, base + (dryUp ? 5 : 0)));
-    return { depthAtr, reclaim, displacementAtr, trapScore, dryUp, fakeoutReversal: sweepEvent?.fakeoutReversal === true };
+    // eff2-slg v1.0.0 (Part A/B, ranking-only facts): how far the sweep candle closed back beyond the level
+    const reclaimStrengthAtr = reclaim ? Number((Math.abs(sc.c - o.sweepPrice!) / atrV).toFixed(2)) : 0;
+    const reclaimFast = reclaimStrengthAtr >= 0.2; // decisive reclaim → trap/speed credit in eff2 bucket
+    return { depthAtr, reclaim, displacementAtr, trapScore, dryUp, fakeoutReversal: sweepEvent?.fakeoutReversal === true, reclaimStrengthAtr, reclaimFast };
   })();
   const zone = (() => {
     if (!o.zone) return null;
@@ -363,8 +366,14 @@ function buildReasoning(
     const mid = (o.zone.top + o.zone.bottom) / 2;
     return { kind: o.zone.kind, grade, distanceAtr: Number((Math.abs(o.entry - mid) / atrV).toFixed(2)) };
   })();
+  // eff2-slg v1.0.0 (Part A, ranking-only): pool significance = touches×25 + equal-cluster 20, cap 100 (≥60 earns a boost)
   const liquidity = o.pool
-    ? { grade: gradeLiquidity(o.pool.touches), source: `${o.pool.kind.replace("_", " ")} ×${o.pool.touches}`, distanceAtr: Number((Math.abs(o.pool.price - o.entry) / atrV).toFixed(2)) }
+    ? {
+        grade: gradeLiquidity(o.pool.touches),
+        source: `${o.pool.kind.replace("_", " ")} ×${o.pool.touches}`,
+        distanceAtr: Number((Math.abs(o.pool.price - o.entry) / atrV).toFixed(2)),
+        significance: Math.min(100, o.pool.touches * 25 + (o.pool.kind.startsWith("equal") ? 20 : 0)),
+      }
     : null;
   return {
     htfBias: ctx.htfBias,

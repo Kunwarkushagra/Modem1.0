@@ -497,6 +497,8 @@ export function RadarView(props: {
   /* shared batch plumbing — FREQUENCY GUARD: adv v1.2.0 soft layers are reverted (run without them)
      when the last conclusive benchmark failed max(0.8 × baseline, 50) full-run trades in any window. */
   const advActive = variantById(settings.radarTmVariant).advQuality && loadFrequencyGate().ok !== false;
+  /* eff2-slg v1.0.0: Part A positive-only ranking boosts ride the radar when that variant is selected */
+  const eff2Active = variantById(settings.radarTmVariant).eff2;
   const onScanResult = useCallback((res: ReturnType<typeof scanSymbol> extends Promise<infer R> ? R : never) => {
     htfRef.current[res.state.symbol] = res.htfBias;
     setUniverse((u) => ({ ...u, [res.state.symbol]: res.state }));
@@ -513,7 +515,7 @@ export function RadarView(props: {
     if (manual) setManualScanning(true);
     setProgress({ done: 0, total: list.length, current: list[0] });
     const res = await scanUniverse(
-      list, tf, scanFloor, advActive,
+      list, tf, scanFloor, advActive, eff2Active,
       onScanResult,
       (p) => setProgress(p),
       onScanFail,
@@ -525,7 +527,7 @@ export function RadarView(props: {
     if (manual) setManualScanning(false);
     window.setTimeout(() => setProgress(null), 1100);
     return res;
-  }, [tf, scanFloor, advActive, onScanResult, onScanFail]);
+  }, [tf, scanFloor, advActive, eff2Active, onScanResult, onScanFail]);
 
   /* SCAN NOW — full immediate pass on confirmed candles (no waiting for the next close) */
   const scanNow = useCallback(async () => {

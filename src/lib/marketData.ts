@@ -237,22 +237,66 @@ export async function fetchLastPrice(rawSymbol: string, asset: AssetType, tf: Ti
  * Excludes stable/stable-adjacent quotes and leveraged tokens. Used to build the
  * radar's dynamic 30-symbol universe (cached in IndexedDB, refreshed every 6h).
  */
-const EXCLUDED_QUOTES = ["USDC", "FDUSD", "TUSD", "BUSD", "DAI", "EUR", "GBP", "TRY", "BRL", "ARS"];
 const LEVERAGED_RE = /(UP|DOWN|BULL|BEAR)$/;
 
-export async function fetchTop30Usdt(limit = 30): Promise<string[]> {
+/**
+ * Universe Hygiene Guards v2 — data-level filters applied to the top-30 dynamic
+ * universe BEFORE scanning. Display-only: they never touch entry gates, V1-V6,
+ * validity, reasoning, or backtest logic.
+ */
+export interface UniverseGuardConfig {
+  /** additional user-configured base exclusions (merged with the hard stablecoin list) */
+  excludedBases: string[];
+  /** min 24h quote volume in USDT (default 50M) */
+  minQuoteVolume: number;
+}
+export const DEFAULT_UNIVERSE_GUARDS: UniverseGuardConfig = { excludedBases: [], minQuoteVolume: 50_000_000 };
+
+/** Hard stablecoin / fiat-pegged base exclusions (guard 1). */
+export const STABLECOIN_BASES = [
+  "USDC", "USDP", "TUSD", "FDUSD", "BUSD", "DAI", "USDE", "PYUSD",
+  "EURI", "RLUSD", "AEUR", "EURC", "USD1", "USDTB",
+  "EUR", "GBP", "TRY", "BRL", "ARS",
+];
+
+const VOL_FLOOR_PCT = 1.5;      // guard 2: 24h high-low range >= 1.5%
+const CHANGE_CAP_PCT = 25;      // guard 4: |24h price change| <= 25%
+
+interface TickerRow {
+  symbol: string; base: string; qv: number; last: number; high: number; low: number; changePct: number;
+}
+
+function hygienePass(t: TickerRow, excluded: Set<string>, minQv: number): boolean {
+  if (excluded.has(t.base)) return false;                       // guard 1: stablecoins/fiat + custom
+  if (LEVERAGED_RE.test(t.base)) return false;                  // leveraged tokens
+  const rangePct = t.low > 0 ? ((t.high - t.low) / t.low) * 100 : 0;
+  if (rangePct < VOL_FLOOR_PCT) return false;                   // guard 2: volatility floor
+  if (t.qv <= minQv) return false;                              // guard 3: min quote volume
+  if (Math.abs(t.changePct) > CHANGE_CAP_PCT) return false;     // guard 4: runaway price move
+  return true;
+}
+
+export async function fetchTop30Usdt(cfg: UniverseGuardConfig = DEFAULT_UNIVERSE_GUARDS, limit = 30): Promise<string[]> {
+  const excluded = new Set([...STABLECOIN_BASES, ...cfg.excludedBases.map((b) => b.toUpperCase().trim()).filter(Boolean)]);
+  const minQv = Number.isFinite(cfg.minQuoteVolume) && cfg.minQuoteVolume > 0 ? cfg.minQuoteVolume : DEFAULT_UNIVERSE_GUARDS.minQuoteVolume;
   let err: unknown = null;
   for (const base of BINANCE_BASES) {
     try {
       const res = await fetchWithTimeout(`${base}/api/v3/ticker/24hr`, 9000);
       if (!res.ok) throw new Error(`ticker ${res.status}`);
-      const data = (await res.json()) as Array<{ symbol: string; quoteVolume: string; lastPrice: string }>;
+      const data = (await res.json()) as Array<{
+        symbol: string; quoteVolume: string; lastPrice: string; highPrice: string; lowPrice: string; priceChangePercent: string;
+      }>;
       const ranked = data
         .filter((t) => t.symbol.endsWith("USDT"))
-        .filter((t) => Number(t.lastPrice) > 0 && Number(t.quoteVolume) > 0)
-        .map((t) => ({ symbol: t.symbol, base: t.symbol.slice(0, -4), qv: Number(t.quoteVolume) }))
-        .filter((t) => !EXCLUDED_QUOTES.includes(t.base))
-        .filter((t) => !LEVERAGED_RE.test(t.base))
+        .map((t) => ({
+          symbol: t.symbol, base: t.symbol.slice(0, -4),
+          qv: Number(t.quoteVolume), last: Number(t.lastPrice),
+          high: Number(t.highPrice), low: Number(t.lowPrice),
+          changePct: Number(t.priceChangePercent),
+        }))
+        .filter((t) => t.last > 0 && t.qv > 0 && t.high > 0 && t.low > 0)
+        .filter((t) => hygienePass(t, excluded, minQv))
         .sort((a, b) => b.qv - a.qv)
         .slice(0, limit)
         .map((t) => t.symbol);

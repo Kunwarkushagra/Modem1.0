@@ -409,6 +409,9 @@ export interface Settings {
   radarUseTop30: boolean;       // merge Binance top-30 USDT by 24h quote volume (6h cache)
   radarSound: boolean;
   radarTmVariant: TmVariantId;  // which management variant the radar cards describe
+  /* ---- Universe Hygiene Guards v2 (data-level, display-only) ---- */
+  universeExcludedBases: string[];  // extra base exclusions on top of the hard stablecoin list
+  universeMinQuoteVolume: number;   // min 24h quote volume in USDT (default 50M)
   /* ---- AI Insight (opinion layer; server route reads GEMINI_API_KEY from env in production) ---- */
   aiInsightEnabled: boolean;
   geminiApiKey: string;         // static-build fallback only; stays in this browser, never logged

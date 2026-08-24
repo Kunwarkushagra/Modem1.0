@@ -4,7 +4,7 @@ import { radarBeep, revalidateCandidate, scanSymbol, scanUniverse } from "../lib
 import type { BatchProgress } from "../lib/radar";
 import { buildInsightPayload, requestInsight } from "../lib/aiInsight";
 import { fetchLastPrice, fetchTop30Usdt } from "../lib/marketData";
-import { getTop30, putTop30, TOP30_TTL_MS } from "../lib/cache";
+import { advanceStreaks, getTop30, MIN_SCANNABLE_STREAK, putTop30, TOP30_TTL_MS } from "../lib/cache";
 import { addTrade, loadTrades } from "../lib/journal";
 import { loadFrequencyGate, TM_VARIANTS, variantById } from "../lib/tmVariant";
 import { cls, fmtIST, fmtPrice, fmtTime, TF_MINUTES } from "../lib/utils";
@@ -332,31 +332,51 @@ export function RadarView(props: {
   const scanFloor = Math.min(settings.radarQualityFloor, settings.quantityFloor);
   const stepMs = TF_MINUTES[tf] * 60000;
 
-  /* dynamic universe: Binance top-30 USDT by 24h quote volume (6h IndexedDB cache) ∪ user watchlist, max 30 */
+  /* dynamic universe: Binance top-30 USDT by 24h quote volume (6h IndexedDB cache) ∪ user watchlist, max 30.
+     Universe Hygiene Guards v2 filter the list BEFORE scanning: stablecoins, volatility floor,
+     min quote volume, price-change cap (in fetchTop30Usdt) + min list age (streaks, here). */
   const [top30, setTop30] = useState<string[]>([]);
+  const [warming, setWarming] = useState<string[]>([]); // symbols in top-30 but streak < MIN_SCANNABLE_STREAK
   const [top30Age, setTop30Age] = useState<number | null>(null);
+  const guardCfg = useMemo(
+    () => ({ excludedBases: settings.universeExcludedBases, minQuoteVolume: settings.universeMinQuoteVolume }),
+    [settings.universeExcludedBases, settings.universeMinQuoteVolume],
+  );
   useEffect(() => {
     let live = true;
     (async () => {
-      if (!settings.radarUseTop30) { setTop30([]); setTop30Age(null); return; }
+      if (!settings.radarUseTop30) { setTop30([]); setWarming([]); setTop30Age(null); return; }
       const cached = await getTop30();
-      if (cached && live) { setTop30(cached.items); setTop30Age(cached.ts); }
+      if (cached && live) { setTop30(cached.items); setWarming(cached.warming ?? []); setTop30Age(cached.ts); }
       if (cached && Date.now() - cached.ts < TOP30_TTL_MS) return;
       try {
-        const items = await fetchTop30Usdt();
-        await putTop30(items);
-        if (live) { setTop30(items); setTop30Age(Date.now()); }
+        const items = await fetchTop30Usdt(guardCfg);
+        const streaks = await advanceStreaks(items);
+        const warmingNow = items.filter((s) => (streaks[s] ?? 0) < MIN_SCANNABLE_STREAK);
+        await putTop30(items, warmingNow);
+        if (live) { setTop30(items); setWarming(warmingNow); setTop30Age(Date.now()); }
       } catch (e) {
         console.error("[radar] top-30 universe fetch failed —", e);
       }
     })();
     return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.radarUseTop30]);
 
+  /* symbols actually scanned: scannable top-30 (streak >= 2) ∪ user watchlist, capped at 30 */
+  const scannableTop30 = useMemo(
+    () => top30.filter((s) => !warming.includes(s)),
+    [top30, warming],
+  );
   const symbols = useMemo(() => {
-    const merged = settings.radarUseTop30 ? [...top30, ...settings.radarSymbols] : [...settings.radarSymbols];
+    const merged = settings.radarUseTop30 ? [...scannableTop30, ...settings.radarSymbols] : [...settings.radarSymbols];
     return [...new Set(merged)].slice(0, 30);
-  }, [top30, settings.radarSymbols, settings.radarUseTop30]);
+  }, [scannableTop30, settings.radarSymbols, settings.radarUseTop30]);
+  /* full strip list = scannable ∪ warming (warming rendered with a chip, never scanned) */
+  const stripList = useMemo(
+    () => [...new Set([...symbols, ...(settings.radarUseTop30 ? warming : [])])],
+    [symbols, warming, settings.radarUseTop30],
+  );
 
   const [universe, setUniverse] = useState<Record<string, SymbolScanState>>({});
   const [candidates, setCandidates] = useState<RadarCandidate[]>([]);
@@ -622,6 +642,11 @@ export function RadarView(props: {
         </span>
         <span className="text-fog-400">TF {tf.toUpperCase()}{tf === "4h" ? " · HTF 1D · EXEC 1H" : ""}</span>
         <span className="text-fog-400">MODE {mode.toUpperCase()}{autoFallback ? "→QUANTITY" : ""}</span>
+        {settings.radarUseTop30 && (
+          <span className="text-fog-500" title="Universe Hygiene Guards v2: stablecoins excluded, 24h range ≥1.5%, quoteVolume > min, |change| ≤25%, min 2 refreshes">
+            HYGIENE ✓{warming.length > 0 ? <span className="text-info-400"> · {warming.length} WARMING</span> : ""}
+          </span>
+        )}
         <span className={cls("font-bold", activeCount > 0 ? "text-gold-300" : "text-fog-500")}>CANDIDATES FOUND: {activeCount}</span>
         <span className={cls("font-bold", top.length > 0 ? "text-bull-400" : "text-fog-500")}>SHOWING: {top.length}{mode === "quality" || (mode === "auto" && !autoFallback) ? "/5" : "/8"}</span>
         <span className="ml-auto text-fog-500">CONFIRMED-CANDLES ONLY · SHARED LIVE ENGINE</span>
@@ -630,18 +655,23 @@ export function RadarView(props: {
       {/* universe strip — per-symbol status */}
       <div className={cls("tv-panel flex flex-wrap items-center gap-2 px-3 py-2", anyScanning && "tv-scanbar")}>
         <span className="font-mono text-[9px] tracking-[0.2em] text-fog-500">UNIVERSE</span>
-        {symbols.map((sym) => {
+        {stripList.map((sym) => {
+          const isWarming = warming.includes(sym);
           const u = universe[sym];
           const chip = chipFor(u);
           const dot = u?.status === "live" ? "bg-bull-500" : u?.status === "scanning" ? "bg-gold-400 tv-blink" : u?.status === "stale" ? "bg-bear-500" : "bg-ink-400";
           return (
             <span key={sym} className={cls("flex items-center gap-1.5 rounded border px-2 py-1 font-mono text-[10px]",
-              u?.status === "stale" ? "border-bear-600/50 text-bear-300" : "border-ink-600 text-fog-300")}
-              title={`${u?.error ? "ERROR: " + u.error + " · " : ""}last scan ${u?.lastScanAt ? fmtIST(u.lastScanAt) : "—"}`}>
-              <span className={cls("tv-live-dot inline-block h-1.5 w-1.5 rounded-full", dot)} />
+              isWarming ? "border-info-500/50 text-info-400" : u?.status === "stale" ? "border-bear-600/50 text-bear-300" : "border-ink-600 text-fog-300")}
+              title={isWarming
+                ? `New listing — needs ${MIN_SCANNABLE_STREAK} consecutive 6h refreshes before scanning`
+                : `${u?.error ? "ERROR: " + u.error + " · " : ""}last scan ${u?.lastScanAt ? fmtIST(u.lastScanAt) : "—"}`}>
+              <span className={cls("tv-live-dot inline-block h-1.5 w-1.5 rounded-full", isWarming ? "bg-info-400 tv-blink" : dot)} />
               <span className="font-bold tracking-wider">{sym}</span>
-              <span className="text-fog-500">{u?.lastPrice != null ? fmtPrice(u.lastPrice, "crypto") : "—"}</span>
-              <Badge tone={chip.tone} className="text-[8px]">{chip.label}</Badge>
+              {!isWarming && <span className="text-fog-500">{u?.lastPrice != null ? fmtPrice(u.lastPrice, "crypto") : "—"}</span>}
+              {isWarming
+                ? <Badge tone="info" className="tv-blink text-[8px]">NEW — WARMING UP</Badge>
+                : <Badge tone={chip.tone} className="text-[8px]">{chip.label}</Badge>}
             </span>
           );
         })}

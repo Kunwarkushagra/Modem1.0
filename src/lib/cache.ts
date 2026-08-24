@@ -70,13 +70,13 @@ export async function getCandles(key: string): Promise<CachedCandles | null> {
 
 /* ---- universe cache: Binance top-30 USDT pairs by 24h quote volume (6h TTL) ---- */
 
-export interface CachedTop30 { items: string[]; ts: number }
+export interface CachedTop30 { items: string[]; warming?: string[]; ts: number }
 export const TOP30_TTL_MS = 6 * 3600_000;
 const TOP30_KEY = "meta:top30usdt";
 const memTop30 = new Map<string, CachedTop30>();
 
-export async function putTop30(items: string[]): Promise<void> {
-  const value: CachedTop30 = { items, ts: Date.now() };
+export async function putTop30(items: string[], warming: string[] = []): Promise<void> {
+  const value: CachedTop30 = { items, warming, ts: Date.now() };
   memTop30.set(TOP30_KEY, value);
   const db = await openDb();
   if (!db) return;
@@ -90,6 +90,59 @@ export async function putTop30(items: string[]): Promise<void> {
     });
   } catch { /* non-fatal */ }
 }
+
+/* ---- consecutive-refresh streaks (Universe Hygiene guard 5: min list age) ---- */
+
+const STREAK_KEY = "meta:top30streaks";
+const memStreak = new Map<string, Record<string, number>>();
+
+export async function getStreaks(): Promise<Record<string, number>> {
+  const memHit = memStreak.get(STREAK_KEY) ?? {};
+  const db = await openDb();
+  if (!db) return memHit;
+  try {
+    const val = await new Promise<Record<string, number> | null>((resolve) => {
+      const tx = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).get(STREAK_KEY);
+      req.onsuccess = () => resolve((req.result as Record<string, number>) ?? null);
+      req.onerror = () => resolve(null);
+    });
+    return val ?? memHit;
+  } catch {
+    return memHit;
+  }
+}
+
+export async function putStreaks(s: Record<string, number>): Promise<void> {
+  memStreak.set(STREAK_KEY, s);
+  const db = await openDb();
+  if (!db) return;
+  try {
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(s, STREAK_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    });
+  } catch { /* non-fatal */ }
+}
+
+/**
+ * Advance the consecutive-appearance streak for the freshly refreshed universe.
+ * Symbols still present get +1; symbols that dropped out are removed (streak resets
+ * if they return later). A symbol is scannable once its streak reaches 2.
+ */
+export async function advanceStreaks(currentSymbols: string[]): Promise<Record<string, number>> {
+  const prev = await getStreaks();
+  const next: Record<string, number> = {};
+  for (const s of currentSymbols) next[s] = (prev[s] ?? 0) + 1;
+  await putStreaks(next);
+  return next;
+}
+
+/** Guard 5 threshold: two consecutive refreshes before scannable. */
+export const MIN_SCANNABLE_STREAK = 2;
 
 export async function getTop30(): Promise<CachedTop30 | null> {
   const memHit = memTop30.get(TOP30_KEY) ?? null;

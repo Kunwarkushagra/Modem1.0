@@ -416,6 +416,10 @@ export interface Settings {
   aiInsightEnabled: boolean;
   geminiApiKey: string;         // static-build fallback only; stays in this browser, never logged
   geminiModel: string;          // default gemini-2.0-flash
+  /* ---- Universe hygiene guards v2 (data-level, pre-scan; never auto-tuned) ---- */
+  universeExcludeBases: string[]; // extra excluded base assets on top of the built-in stablecoin list
+  universeMinQuoteVol: number;    // 24h quote-volume floor, USDT (default 50M)
+  universeVolFloorPct: number;    // 24h high-low range floor, % (default 1.5)
 }
 
 export interface BacktestTrade {

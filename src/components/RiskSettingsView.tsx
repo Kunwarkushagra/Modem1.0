@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import type { Settings, Trade } from "../lib/types";
 import { computePosition, sendTelegram } from "../lib/ai";
 import { clearTop30 } from "../lib/cache";
@@ -8,6 +9,25 @@ import { Badge, Btn, Card, IGear, IRadar, IShield, IZap, Stat, useToast } from "
 
 const inp = "w-full rounded-md border border-ink-500 bg-ink-900 px-2.5 py-1.5 font-mono text-xs text-fog-100 outline-none focus:border-gold-600/70";
 const lbl = "mb-1 block font-mono text-[10px] tracking-widest text-fog-500";
+
+/* Optional-guard row: toggle + threshold, dimmed when off */
+function OptGuardRow(props: { label: string; on: boolean; onToggle: (v: boolean) => void; children: ReactNode }) {
+  return (
+    <div className={cls("flex items-center gap-3 rounded-md border px-3 py-2 transition-colors",
+      props.on ? "border-gold-600/60 bg-gold-500/8" : "border-ink-600 bg-ink-800/40")}>
+      <button type="button" onClick={() => props.onToggle(!props.on)}
+        className={cls("tv-btn relative h-5 w-9 shrink-0 rounded-full transition-colors", props.on ? "bg-gold-500" : "bg-ink-500")}
+        aria-pressed={props.on}>
+        <span className={cls("absolute top-0.5 h-4 w-4 rounded-full bg-ink-950 transition-all", props.on ? "left-[18px]" : "left-0.5")} />
+      </button>
+      <span className={cls("w-40 shrink-0 font-mono text-[10px] font-bold tracking-widest", props.on ? "text-gold-300" : "text-fog-400")}>
+        {props.label}
+      </span>
+      <span className={cls("font-mono text-[9px] tracking-wider", props.on ? "text-gold-400" : "text-fog-500")}>{props.on ? "ON" : "OFF"}</span>
+      <div className="ml-auto flex items-center gap-1.5">{props.children}</div>
+    </div>
+  );
+}
 
 /* ---------------- Risk Management ---------------- */
 
@@ -250,49 +270,58 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
 
           <div className="mt-4 border-t border-ink-600/60 pt-3">
             <div className="mb-2 flex items-center gap-2">
-              <span className="font-mono text-[10px] font-bold tracking-[0.18em] text-fog-300">UNIVERSE HYGIENE GUARDS v2</span>
+              <span className="font-mono text-[10px] font-bold tracking-[0.18em] text-fog-300">UNIVERSE GUARDS</span>
               <Badge tone="info" className="text-[8px]">DATA-LEVEL · DISPLAY ONLY</Badge>
             </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <label className="block">
-                <span className={lbl}>EXTRA EXCLUDED BASES (comma-separated · stables USDC…USDTB always cut)</span>
-                <input defaultValue={s.universeExtraExcludes}
-                  onBlur={(e) => {
-                    const v = e.target.value.toUpperCase();
-                    e.target.value = v;
-                    save({ universeExtraExcludes: v }, v.trim() ? "Extra exclusions saved" : "Extra exclusions cleared");
-                  }} className={inp} placeholder="e.g. SHIB, PEPE" />
-              </label>
-              <label className="block">
-                <span className={lbl}>MIN 24H QUOTE VOLUME (USDT · default 50M)</span>
-                <input type="number" min={0} step={1_000_000} defaultValue={s.universeMinQuoteVolume}
+            <label className="block">
+              <span className={lbl}>EXTRA EXCLUDED BASES (comma-separated · stables USDC…USDTB always cut)</span>
+              <input defaultValue={s.universeExtraExcludes}
+                onBlur={(e) => {
+                  const v = e.target.value.toUpperCase();
+                  e.target.value = v;
+                  save({ universeExtraExcludes: v }, v.trim() ? "Extra exclusions saved" : "Extra exclusions cleared");
+                }} className={inp} placeholder="e.g. SHIB, PEPE" />
+            </label>
+
+            {/* Optional numeric guards — DEFAULT OFF */}
+            <div className="mt-3 space-y-2">
+              <OptGuardRow
+                label="MIN 24H QUOTE VOLUME" on={s.universeMinQuoteVolumeEnabled}
+                onToggle={(v) => save({ universeMinQuoteVolumeEnabled: v }, `Min-volume guard ${v ? "on" : "off"}`)}>
+                <input type="number" min={0} step={1_000_000} defaultValue={s.universeMinQuoteVolume} disabled={!s.universeMinQuoteVolumeEnabled}
                   onBlur={(e) => {
                     const v = Math.max(0, Number(e.target.value) || 50_000_000);
                     e.target.value = String(v);
                     save({ universeMinQuoteVolume: v }, `Min quote volume: ${v >= 1e6 ? (v / 1e6).toFixed(0) + "M" : v}`);
-                  }} className={inp} />
-              </label>
-              <label className="block">
-                <span className={lbl}>24H RANGE FLOOR (% · default 1.5)</span>
-                <input type="number" min={0} step={0.1} defaultValue={s.universeVolFloorPct}
+                  }} className={cls(inp, "w-28", !s.universeMinQuoteVolumeEnabled && "opacity-40")} />
+                <span className={lbl + " mb-0 self-center"}>USDT</span>
+              </OptGuardRow>
+              <OptGuardRow
+                label="24H RANGE FLOOR" on={s.universeVolFloorEnabled}
+                onToggle={(v) => save({ universeVolFloorEnabled: v }, `Volatility-floor guard ${v ? "on" : "off"}`)}>
+                <input type="number" min={0} step={0.1} defaultValue={s.universeVolFloorPct} disabled={!s.universeVolFloorEnabled}
                   onBlur={(e) => {
                     const v = Math.max(0, Number(e.target.value) || 1.5);
                     e.target.value = String(v);
                     save({ universeVolFloorPct: v }, `Volatility floor: ${v}%`);
-                  }} className={inp} />
-              </label>
-              <label className="block">
-                <span className={lbl}>|24H CHANGE| CAP (% · default 25)</span>
-                <input type="number" min={1} step={1} defaultValue={s.universeChangeCapPct}
+                  }} className={cls(inp, "w-28", !s.universeVolFloorEnabled && "opacity-40")} />
+                <span className={lbl + " mb-0 self-center"}>%</span>
+              </OptGuardRow>
+              <OptGuardRow
+                label="|24H CHANGE| CAP" on={s.universeChangeCapEnabled}
+                onToggle={(v) => save({ universeChangeCapEnabled: v }, `Change-cap guard ${v ? "on" : "off"}`)}>
+                <input type="number" min={1} step={1} defaultValue={s.universeChangeCapPct} disabled={!s.universeChangeCapEnabled}
                   onBlur={(e) => {
                     const v = Math.max(1, Number(e.target.value) || 25);
                     e.target.value = String(v);
                     save({ universeChangeCapPct: v }, `Change cap: ±${v}%`);
-                  }} className={inp} />
-              </label>
+                  }} className={cls(inp, "w-28", !s.universeChangeCapEnabled && "opacity-40")} />
+                <span className={lbl + " mb-0 self-center"}>%</span>
+              </OptGuardRow>
             </div>
+
             <p className="mt-2 text-[10px] leading-relaxed text-fog-500">
-              Applied to the top-30 universe <span className="text-fog-300">before scanning</span>: stablecoins/fiat pegs excluded (hard list + your extras), 24h range ≥ 1.5%, quoteVolume &gt; min, |24h change| ≤ 25%. New listings need <span className="text-fog-300">2 consecutive 6h refreshes</span> before they're scannable (shown as “NEW — WARMING UP”). RESYNC is manual and never auto-tunes these floors. Strategy, validators, and backtest are untouched.
+              Exclusions are <span className="text-fog-300">STABLECOINS ONLY</span> by default (hard list USDC…USDTB + your extras). The three numeric guards above are <span className="text-fog-300">optional and OFF by default</span> — flip them on to re-enable. There is <span className="text-fog-300">no warm-up</span>: every top-30 symbol scans on first refresh. RESYNC is manual and never auto-tunes these values. Strategy, validators, and backtest are untouched.
             </p>
           </div>
 

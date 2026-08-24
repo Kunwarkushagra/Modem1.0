@@ -4,7 +4,7 @@ import { radarBeep, revalidateCandidate, scanSymbol, scanUniverse } from "../lib
 import type { BatchProgress } from "../lib/radar";
 import { buildInsightPayload, requestInsight } from "../lib/aiInsight";
 import { fetchLastPrice, fetchUniverseRaw } from "../lib/marketData";
-import { advanceStreaks, getStreaks, getTop30, MIN_SCANNABLE_STREAK, putTop30, TOP30_TTL_MS } from "../lib/cache";
+import { getTop30, putTop30, TOP30_TTL_MS } from "../lib/cache";
 import { applyUniverseGuards, parseExtraExcludes } from "../lib/universe";
 import type { ExcludedEntry, UniverseCfg } from "../lib/universe";
 import { addTrade, loadTrades } from "../lib/journal";
@@ -335,23 +335,32 @@ export function RadarView(props: {
   const stepMs = TF_MINUTES[tf] * 60000;
 
   /* dynamic universe: Binance top-30 USDT by 24h quote volume — RAW stats cached 6h in IndexedDB
-     (so every guard stays re-applicable after reload). Universe Hygiene Guards v2 (lib/universe.ts)
-     filter the list BEFORE scanning:
-       1. stablecoin bases (hard list ∪ configured)   2. 24h range ≥ volatility floor
-       3. quoteVolume > min                           4. |24h change| ≤ cap
-       5. two consecutive 6h refreshes (streaks) → "NEW — WARMING UP" until then
-     Floors are user-tunable in Settings and NEVER auto-tuned; RESYNC stays manual. */
+      (so every guard stays re-applicable after reload). Universe guards (lib/universe.ts)
+      filter the list BEFORE scanning:
+        1. stablecoin bases (hard list ∪ configured)  — the ONLY exclusion enabled by default
+        2. 24h range ≥ vol floor   (optional toggle, default OFF)
+        3. quoteVolume > min       (optional toggle, default OFF)
+        4. |24h change| ≤ cap      (optional toggle, default OFF)
+      No warm-up / min-list-age gating: every top-30 symbol is scannable on first refresh.
+      Floors are user-tunable in Settings and NEVER auto-tuned; RESYNC stays manual. */
   const [scannableTop30, setScannableTop30] = useState<string[]>([]);
-  const [warming, setWarming] = useState<string[]>([]);      // streak < MIN_SCANNABLE_STREAK
   const [excluded, setExcluded] = useState<ExcludedEntry[]>([]);
   const [top30Age, setTop30Age] = useState<number | null>(null);
   const [resyncNonce, setResyncNonce] = useState(0);
   const guardCfg = useMemo<UniverseCfg>(() => ({
     extraExcludes: parseExtraExcludes(settings.universeExtraExcludes),
+    minQuoteVolumeEnabled: settings.universeMinQuoteVolumeEnabled,
     minQuoteVolume: settings.universeMinQuoteVolume,
+    volFloorEnabled: settings.universeVolFloorEnabled,
     volFloorPct: settings.universeVolFloorPct,
+    changeCapEnabled: settings.universeChangeCapEnabled,
     changeCapPct: settings.universeChangeCapPct,
-  }), [settings.universeExtraExcludes, settings.universeMinQuoteVolume, settings.universeVolFloorPct, settings.universeChangeCapPct]);
+  }), [
+    settings.universeExtraExcludes,
+    settings.universeMinQuoteVolumeEnabled, settings.universeMinQuoteVolume,
+    settings.universeVolFloorEnabled, settings.universeVolFloorPct,
+    settings.universeChangeCapEnabled, settings.universeChangeCapPct,
+  ]);
 
   /* Settings "RESYNC NOW" clears the cache and fires this; the pass re-runs immediately */
   useEffect(() => {
@@ -363,50 +372,41 @@ export function RadarView(props: {
   useEffect(() => {
     let live = true;
     (async () => {
-      if (!settings.radarUseTop30) { setScannableTop30([]); setWarming([]); setExcluded([]); setTop30Age(null); return; }
+      if (!settings.radarUseTop30) { setScannableTop30([]); setExcluded([]); setTop30Age(null); return; }
       let entries: RawUniverseEntry[] | null = null;
       let ts: number | null = null;
-      let streaks: Record<string, number> = {};
       const cached = await getTop30();
       if (cached) { entries = cached.entries; ts = cached.ts; }
       if (!entries || !ts || Date.now() - ts > TOP30_TTL_MS) {
         try {
           entries = await fetchUniverseRaw();
           ts = Date.now();
-          streaks = await advanceStreaks(entries.map((e) => e.symbol));
           await putTop30(entries);
-          console.info(`[universe] refresh ok · ${entries.length} raw rows · streaks advanced`);
+          console.info(`[universe] refresh ok · ${entries.length} raw rows · all scannable immediately`);
         } catch (e) {
           console.error("[radar] universe refresh failed — falling back to last cache —", e);
-          streaks = await getStreaks();
         }
-      } else {
-        streaks = await getStreaks();
       }
       if (!live || !entries || !ts) return;
-      const roster: Record<string, { consecutive: number; firstSeenAt: number; lastSeenAt: number }> = {};
-      for (const [sym, n] of Object.entries(streaks)) roster[sym] = { consecutive: n, firstSeenAt: ts, lastSeenAt: ts };
-      const view = applyUniverseGuards(entries, guardCfg, roster);
+      const view = applyUniverseGuards(entries, guardCfg);
       setScannableTop30(view.scannable);
-      setWarming(view.warming.map((w) => w.symbol));
       setExcluded(view.excluded);
       setTop30Age(ts);
-      console.info(`[universe] guards → ${view.scannable.length} scannable · ${view.warming.length} warming · ${view.excluded.length} cut${view.excluded.length ? ` (${view.excluded.map((x) => x.symbol + ":" + x.tag).join(", ")})` : ""}`);
+      const stableCuts = view.excluded.filter((x) => x.tag === "STABLE").length;
+      console.info(`[universe] guards → ${view.scannable.length} scannable · ${stableCuts} stable cut${view.excluded.length !== stableCuts ? ` · ${view.excluded.length - stableCuts} cut by optional guard` : ""}${view.excluded.length ? ` (${view.excluded.map((x) => x.symbol + ":" + x.tag).join(", ")})` : ""}`);
     })();
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.radarUseTop30, guardCfg, resyncNonce]);
-
   /* symbols actually scanned: guard-passed top-30 ∪ user watchlist (exempt from guards), capped at 30 */
   const symbols = useMemo(() => {
     const merged = settings.radarUseTop30 ? [...scannableTop30, ...settings.radarSymbols] : [...settings.radarSymbols];
     return [...new Set(merged)].slice(0, 30);
   }, [scannableTop30, settings.radarSymbols, settings.radarUseTop30]);
-  /* full strip list = scannable ∪ warming (warming rendered with a chip, never scanned) */
-  const stripList = useMemo(
-    () => [...new Set([...symbols, ...(settings.radarUseTop30 ? warming : [])])],
-    [symbols, warming, settings.radarUseTop30],
-  );
+  /* full strip list = the scanned universe (stablecoin cuts are excluded, not rendered) */
+  const stripList = useMemo(() => symbols, [symbols]);
+  /* HYGIENE badge shows STABLECOIN cuts only (spec) */
+  const stableCuts = useMemo(() => excluded.filter((x) => x.tag === "STABLE").length, [excluded]);
 
   const [universe, setUniverse] = useState<Record<string, SymbolScanState>>({});
   const [candidates, setCandidates] = useState<RadarCandidate[]>([]);
@@ -673,9 +673,8 @@ export function RadarView(props: {
         <span className="text-fog-400">TF {tf.toUpperCase()}{tf === "4h" ? " · HTF 1D · EXEC 1H" : ""}</span>
         <span className="text-fog-400">MODE {mode.toUpperCase()}{autoFallback ? "→QUANTITY" : ""}</span>
         {settings.radarUseTop30 && (
-          <span className="text-fog-500" title={`Universe Hygiene Guards v2 — stablecoins (hard + configured) excluded · 24h range ≥ ${settings.universeVolFloorPct}% · quoteVolume > ${(settings.universeMinQuoteVolume / 1e6).toFixed(0)}M · |change| ≤ ${settings.universeChangeCapPct}% · min ${MIN_SCANNABLE_STREAK} consecutive refreshes${top30Age ? `\nlist fetched ${fmtIST(top30Age)}` : ""}${excluded.length ? `\n\nCUT BY GUARDS:\n${excluded.map((x) => `${x.symbol} [${x.tag}] — ${x.reason}`).join("\n")}` : ""}`}>
-            HYGIENE ✓{warming.length > 0 && <span className="text-info-400"> · {warming.length} WARM</span>}
-            {excluded.length > 0 && <span className="text-bear-400"> · {excluded.length} CUT</span>}
+          <span className="text-fog-500" title={`Universe guards — STABLECOINS ONLY excluded by default (hard list + configured). Optional numeric guards (24h range / min volume / change cap) are ${settings.universeVolFloorEnabled || settings.universeMinQuoteVolumeEnabled || settings.universeChangeCapEnabled ? "ENABLED in Settings" : "OFF"}. Every top-30 symbol scans on first refresh — no warm-up.${top30Age ? `\nlist fetched ${fmtIST(top30Age)}` : ""}${excluded.length ? `\n\nCUT BY GUARDS:\n${excluded.map((x) => `${x.symbol} [${x.tag}] — ${x.reason}`).join("\n")}` : ""}`}>
+            HYGIENE ✓{stableCuts > 0 && <span className="text-bear-400"> · {stableCuts} CUT · STABLE</span>}
           </span>
         )}
         <span className={cls("font-bold", activeCount > 0 ? "text-gold-300" : "text-fog-500")}>CANDIDATES FOUND: {activeCount}</span>
@@ -687,22 +686,17 @@ export function RadarView(props: {
       <div className={cls("tv-panel flex flex-wrap items-center gap-2 px-3 py-2", anyScanning && "tv-scanbar")}>
         <span className="font-mono text-[9px] tracking-[0.2em] text-fog-500">UNIVERSE</span>
         {stripList.map((sym) => {
-          const isWarming = warming.includes(sym);
           const u = universe[sym];
           const chip = chipFor(u);
           const dot = u?.status === "live" ? "bg-bull-500" : u?.status === "scanning" ? "bg-gold-400 tv-blink" : u?.status === "stale" ? "bg-bear-500" : "bg-ink-400";
           return (
             <span key={sym} className={cls("flex items-center gap-1.5 rounded border px-2 py-1 font-mono text-[10px]",
-              isWarming ? "border-info-500/50 text-info-400" : u?.status === "stale" ? "border-bear-600/50 text-bear-300" : "border-ink-600 text-fog-300")}
-              title={isWarming
-                ? `New listing — needs ${MIN_SCANNABLE_STREAK} consecutive 6h refreshes before scanning`
-                : `${u?.error ? "ERROR: " + u.error + " · " : ""}last scan ${u?.lastScanAt ? fmtIST(u.lastScanAt) : "—"}`}>
-              <span className={cls("tv-live-dot inline-block h-1.5 w-1.5 rounded-full", isWarming ? "bg-info-400 tv-blink" : dot)} />
+              u?.status === "stale" ? "border-bear-600/50 text-bear-300" : "border-ink-600 text-fog-300")}
+              title={`${u?.error ? "ERROR: " + u.error + " · " : ""}last scan ${u?.lastScanAt ? fmtIST(u.lastScanAt) : "—"}`}>
+              <span className={cls("tv-live-dot inline-block h-1.5 w-1.5 rounded-full", dot)} />
               <span className="font-bold tracking-wider">{sym}</span>
-              {!isWarming && <span className="text-fog-500">{u?.lastPrice != null ? fmtPrice(u.lastPrice, "crypto") : "—"}</span>}
-              {isWarming
-                ? <Badge tone="info" className="tv-blink text-[8px]">NEW — WARMING UP</Badge>
-                : <Badge tone={chip.tone} className="text-[8px]">{chip.label}</Badge>}
+              <span className="text-fog-500">{u?.lastPrice != null ? fmtPrice(u.lastPrice, "crypto") : "—"}</span>
+              <Badge tone={chip.tone} className="text-[8px]">{chip.label}</Badge>
             </span>
           );
         })}

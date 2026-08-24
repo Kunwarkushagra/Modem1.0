@@ -1,6 +1,6 @@
 import type { AiInsightPayload, AiInsightResult, InsightStance, RadarCandidate } from "./types";
 import { getInsight, putInsight } from "./cache";
-import { fmtIST } from "./utils";
+import { fmtIST, roundTick } from "./utils";
 import { COSTS } from "./backtest";
 
 /**
@@ -59,11 +59,12 @@ export function buildInsightPayload(c: RadarCandidate, mode: "quality" | "quanti
     score: c.score.total,
     scoreBreakdown: c.score,
     confluences: s.confluences,
-    entry: s.entry_price,
-    stopLoss: s.stop_loss,
-    takeProfit1: s.take_profit1,
-    takeProfit2: s.take_profit2,
-    invalidationLevel: s.invalidation_level,
+    // all prices rounded to symbol tick precision — the model must never see (or restate) a 17-digit float
+    entry: roundTick(s.entry_price, c.assetType),
+    stopLoss: roundTick(s.stop_loss, c.assetType),
+    takeProfit1: roundTick(s.take_profit1, c.assetType),
+    takeProfit2: roundTick(s.take_profit2, c.assetType),
+    invalidationLevel: roundTick(s.invalidation_level, c.assetType),
     costInR: Number(costInR.toFixed(3)),
     session: r?.session.name ?? "unknown",
     liquidityGrade: r?.liquidity?.grade ?? null,
@@ -117,8 +118,9 @@ function parseGeminiText(text: string): unknown {
 
 /* ---------------- transport ---------------- */
 
-const DEFAULT_MODEL = "gemini-2.0-flash";
-const FALLBACK_MODEL = "gemini-1.5-flash"; // auto-retry target on 404 MODEL_NOT_FOUND
+const DEFAULT_MODEL = "gemini-3-flash-preview";
+/** Auto-fallback chain on 404 (MODEL_NOT_FOUND / retired model): each hop is logged. */
+const MODEL_FALLBACK_CHAIN = ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite"];
 
 /** Typed transport error: exact HTTP status + machine-readable code for the debug chip. */
 class AiCallError extends Error {
@@ -172,19 +174,25 @@ async function geminiOnce(payload: AiInsightPayload, key: string, model: string)
 /**
  * Browser fallback call. Endpoint is the documented v1beta shape:
  * POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=<key>
- * On 404 (MODEL_NOT_FOUND / retired model) it auto-retries once with gemini-1.5-flash.
+ * On 404 (MODEL_NOT_FOUND / retired model) it walks the fallback chain:
+ * gemini-3-flash-preview → gemini-2.5-flash → gemini-2.5-flash-lite.
  */
 async function callGeminiDirect(payload: AiInsightPayload, key: string, model: string): Promise<unknown> {
-  const primary = model || DEFAULT_MODEL;
-  try {
-    return await geminiOnce(payload, key, primary);
-  } catch (e) {
-    if (e instanceof AiCallError && e.status === 404 && primary !== FALLBACK_MODEL) {
-      console.info(`[ai-insight] ${primary} unavailable (404 ${e.code}) — auto-fallback → ${FALLBACK_MODEL}`);
-      return await geminiOnce(payload, key, FALLBACK_MODEL);
+  const requested = model || DEFAULT_MODEL;
+  const chain = [requested, ...MODEL_FALLBACK_CHAIN].filter((m, i, arr) => arr.indexOf(m) === i);
+  for (let i = 0; i < chain.length; i++) {
+    try {
+      return await geminiOnce(payload, key, chain[i]);
+    } catch (e) {
+      if (e instanceof AiCallError && e.status === 404 && i < chain.length - 1) {
+        console.info(`[ai-insight] ${chain[i]} unavailable (404 ${e.code}) — auto-fallback → ${chain[i + 1]}`);
+        continue;
+      }
+      throw e;
     }
-    throw e;
   }
+  // unreachable — the loop always returns or throws — kept for exhaustiveness
+  throw new AiCallError(404, "MODEL_NOT_FOUND");
 }
 
 async function callServerRoute(payload: AiInsightPayload): Promise<unknown> {

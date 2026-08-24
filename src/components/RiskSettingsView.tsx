@@ -363,7 +363,8 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
                 <input type="password" value={s.geminiApiKey} onChange={(e) => setS({ ...s, geminiApiKey: e.target.value })} onBlur={() => save(null, s.geminiApiKey ? "Gemini key saved locally" : undefined)} className={inp} placeholder="AIza…" />
               </label>
               <label className="block"><span className={lbl}>MODEL</span>
-                <input value={s.geminiModel} onChange={(e) => setS({ ...s, geminiModel: e.target.value })} onBlur={() => save(null)} className={inp} placeholder="gemini-2.0-flash" />
+                <input value={s.geminiModel} onChange={(e) => setS({ ...s, geminiModel: e.target.value })} onBlur={() => save(null)} className={inp} placeholder="gemini-3-flash-preview" />
+                <span className="mt-1 block font-mono text-[8.5px] tracking-wider text-fog-500">404 AUTO-FALLBACK: 3-FLASH-PREVIEW → 2.5-FLASH → 2.5-FLASH-LITE</span>
               </label>
             </div>
             <p className="mt-2 text-[10.5px] leading-relaxed text-fog-500">

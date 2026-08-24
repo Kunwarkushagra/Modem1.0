@@ -31,7 +31,7 @@ export const DEFAULT_SETTINGS: Settings = {
   radarTmVariant: "scalp10-adv-v1.2.0",
   aiInsightEnabled: true,
   geminiApiKey: "",
-  geminiModel: "gemini-2.0-flash",
+  geminiModel: "gemini-3-flash-preview",
   universeExtraExcludes: "",
   universeMinQuoteVolumeEnabled: false,
   universeMinQuoteVolume: 50_000_000,

@@ -547,6 +547,8 @@ export interface BenchWindowSpec {
   timeframe: Timeframe;
   days: number;
   label: string;
+  /** legacy windows are contaminated — excluded from all runs and decisions */
+  contaminated?: boolean;
 }
 
 export interface BenchWindowReport {

@@ -62,6 +62,7 @@ export async function runBacktestOnCandles(
   onProgress?: (pct: number) => void,
   dataSource = "cache",
   advQuality = false,
+  slShield = false,
 ): Promise<BacktestResult> {
   const t0 = performance.now();
   const stepMs = TF_MINUTES[params.timeframe] * 60_000;
@@ -70,7 +71,7 @@ export async function runBacktestOnCandles(
   const end = candles.length - 2; // confirmed candles only: never analyze/enter on the forming candle
   const step = Math.max(4, Math.round(candles.length / 160));
 
-  log(`[${tmMode}] walk-forward: ${candles.length} candles · confirmed-only · costs ${(COSTS.entryPct * 100).toFixed(2)}%/${(COSTS.exitPct * 100).toFixed(2)}%+slip`);
+  log(`[${tmMode}${slShield ? " · SL-SHIELD" : ""}] walk-forward: ${candles.length} candles · confirmed-only · costs ${(COSTS.entryPct * 100).toFixed(2)}%/${(COSTS.exitPct * 100).toFixed(2)}%+slip`);
 
   const trades: BacktestTrade[] = [];
   const expiryLog: ExpiryLogItem[] = [];
@@ -86,6 +87,10 @@ export async function runBacktestOnCandles(
   let openSl = 0, openTp1 = 0, openTp2 = 0, openFill = 0, openRisk = 0, trailing = false, openStartI = 0, manageFromI = 0;
   // tm110 state
   let tmPartial = 0, tmPartialDone = false, tmRunner = 0;
+  // eff2-slg v1.0.0 (Part B) — SL-Shield state & counters
+  let shieldLimitFilled = false;
+  let openMaxR = 0;                       // max favourable excursion in R since entry
+  let missNoConfirm = 0, missLimitChase = 0, missLimitUnfilled = 0, staleExits = 0;
 
   /** Full-weight close (whole position on one leg pair). Used by classic always; tm110 for pre-partial stops and un-partialed time marks. */
   const fullClose = (t: BacktestTrade, exitPrice: number, kind: ExitKind, i: number) => {
@@ -155,6 +160,8 @@ export async function runBacktestOnCandles(
     if (open) {
       if (i >= manageFromI) {
         const long = open.direction === "Long";
+        // eff2-slg (Part B): track max favourable excursion for the stale-momentum exit
+        openMaxR = Math.max(openMaxR, ((long ? c.h - openFill : openFill - c.l) / openRisk) || 0);
         if (tmMode === "classic") {
           const hitSl = long ? c.l <= openSl : c.h >= openSl;
           const hitTp1 = long ? c.h >= openTp1 : c.l <= openTp1;
@@ -177,7 +184,11 @@ export async function runBacktestOnCandles(
             if (hitBe) { tmClose(open, openFill, "be", i); }                 // adverse ambiguity: BE before runner
             else if (hitRunner) { tmClose(open, tmRunner, "target", i); }
           }
-          if (open && i - openStartI >= forwardMax) {
+          // eff2-slg (Part B) STALE-MOMENTUM EXIT: +0.5R not reached within 12 candles → exit at market at close
+          if (open && slShield && i - openStartI >= 12 && openMaxR < 0.5) {
+            staleExits++;
+            if (tmPartialDone) tmClose(open, c.c, "stale", i); else fullClose(open, c.c, "stale", i);
+          } else if (open && i - openStartI >= forwardMax) {
             if (tmPartialDone) tmClose(open, c.c, "time", i);                // time exit marks the runner
             else fullClose(open, c.c, "time", i);
           }
@@ -212,21 +223,22 @@ export async function runBacktestOnCandles(
       }
 
       if (!triggered && (long ? c.l <= p.setup.entry_price : c.h >= p.setup.entry_price)) {
-        if (closeTime <= p.validTillTs) { triggered = true; triggerI = i; }
+        if (closeTime <= p.validTillTs) { triggered = true; triggerI = i; shieldLimitFilled = false; }
         else { expire("trigger candle closed after validTill — entry not allowed", i); continue; }
       }
 
-      // fill at NEXT candle open after the confirming trigger close
-      if (triggered && i === triggerI + 1) {
-        const fill = c.o;
+      // helper: construct the trade at `fill` on candle ii (shifts SL/TP by slippage delta).
+      // Returns the trade (or null when risk<=0); the caller assigns it to `open` in straight-line code.
+      const buildOpen = (fill: number, ii: number): BacktestTrade | null => {
+        const cc = candles[ii];
         const delta = fill - p.setup.entry_price;
         const sl = p.setup.stop_loss + delta;
         const tp1 = p.setup.take_profit1 + delta;
         const tp2 = p.setup.take_profit2 + delta;
         const risk = Math.abs(fill - sl);
-        if (risk <= 0) { pending = null; triggered = false; cooldownUntil = i + 2; continue; }
-        open = {
-          i, t: c.t, direction: p.setup.direction,
+        if (risk <= 0) { pending = null; triggered = false; cooldownUntil = ii + 2; return null; }
+        const tr: BacktestTrade = {
+          i: ii, t: cc.t, direction: p.setup.direction,
           entry: fill, sl, tp1, tp2,
           rr: p.setup.risk_reward_ratio, outcome: "breakeven",
           grossR: 0, feesR: 0, pnlR: 0,
@@ -235,10 +247,8 @@ export async function runBacktestOnCandles(
           partialHit: false, exitKind: "time",
         };
         openFill = fill; openSl = sl; openTp1 = tp1; openTp2 = tp2; openRisk = risk;
-        trailing = false; openStartI = i; manageFromI = i;
-        const long2 = open.direction === "Long";
-        const dirSign = long2 ? 1 : -1;
-
+        trailing = false; openStartI = ii; manageFromI = ii; openMaxR = 0;
+        const dirSign = tr.direction === "Long" ? 1 : -1;
         if (tmMode === "tm110") {
           tmPartial = fill + dirSign * risk * 1.0;                                   // TP-PARTIAL = +1.0R
           const tp2dist = Math.abs(tp2 - fill) / risk;
@@ -246,19 +256,54 @@ export async function runBacktestOnCandles(
           tmRunner = p.setup.tp2_objective && tp2dist > 1.0 ? tp2 : tp1;
           tmPartialDone = false;
         }
-
         funnel.entered++;
         pending = null; triggered = false;
-
-        // manage the fill candle immediately (conservative intra-candle resolution)
+        return tr;
+      };
+      const manageFillCandle = (tr: BacktestTrade, ii: number) => {
+        const cc = candles[ii];
+        const long2 = tr.direction === "Long";
         if (tmMode === "classic") {
-          if (long2 ? c.l <= openSl : c.h >= openSl) fullClose(open, openSl, "stop", i);
-          else if (long2 ? c.h >= openTp2 : c.l <= openTp2) fullClose(open, openTp2, "target", i);
-          else if (long2 ? c.h >= openTp1 : c.l <= openTp1) { trailing = true; openSl = openFill; }
+          if (long2 ? cc.l <= openSl : cc.h >= openSl) fullClose(tr, openSl, "stop", ii);
+          else if (long2 ? cc.h >= openTp2 : cc.l <= openTp2) fullClose(tr, openTp2, "target", ii);
+          else if (long2 ? cc.h >= openTp1 : cc.l <= openTp1) { trailing = true; openSl = openFill; }
         } else {
-          if (long2 ? c.l <= openSl : c.h >= openSl) fullClose(open, openSl, "stop", i);
-          else if (long2 ? c.h >= tmPartial : c.l <= tmPartial) { tmPartialDone = true; openSl = openFill; }
+          if (long2 ? cc.l <= openSl : cc.h >= openSl) fullClose(tr, openSl, "stop", ii);
+          else if (long2 ? cc.h >= tmPartial : cc.l <= tmPartial) { tmPartialDone = true; openSl = openFill; }
           // no runner evaluation on the fill candle — conservative; runner management begins next candle
+        }
+      };
+
+      if (triggered) {
+        if (slShield) {
+          // eff2-slg (Part B): maker-limit entry at zone edge + confirmation trigger, 3-candle window.
+          // A fill requires the limit to rest filled (price reached entry) AND a confirmation candle
+          // (directional close, body >= 60% of range). No confirmation => miss (soft), never a veto upstream.
+          const rel = i - triggerI;
+          const entry = p.setup.entry_price;
+          const riskEst = Math.abs(entry - p.setup.stop_loss);
+          if (rel >= 1 && rel <= 3) {
+            if (long ? c.l <= entry : c.h >= entry) shieldLimitFilled = true;
+            const body = Math.abs(c.c - c.o);
+            const range = c.h - c.l;
+            const isConf = range > 0 && body >= 0.6 * range && (long ? c.c > c.o : c.c < c.o);
+            const chased = long ? c.c >= entry + 0.5 * riskEst : c.c <= entry - 0.5 * riskEst;
+            if (isConf && shieldLimitFilled) {
+              const tr = buildOpen(entry, i);                    // maker fill AT the zone edge (entry leg maker fee)
+              if (tr) { open = tr; manageFillCandle(tr, i); }
+            } else if (chased) {
+              missLimitChase++;                                  // price ran >=0.5R away unfilled → cancel
+              pending = null; triggered = false; cooldownUntil = i + 2;
+            } else if (rel === 3) {
+              if (shieldLimitFilled) missNoConfirm++; else missLimitUnfilled++;
+              pending = null; triggered = false; cooldownUntil = i + 2;
+            }
+          }
+          continue;
+        }
+        if (i === triggerI + 1) {
+          const tr = buildOpen(c.o, i);                          // baseline/tm/adv: fill at next candle open
+          if (tr) { open = tr; manageFillCandle(tr, i); }
         }
       }
       continue;
@@ -356,6 +401,10 @@ export async function runBacktestOnCandles(
     grossR: trades.reduce((s, t) => s + t.grossR, 0),
     equityR,
     ...agg,
+    missNoConfirm,
+    missLimitChase,
+    missLimitUnfilled,
+    staleExits,
     durationMs: performance.now() - t0,
     dataSource,
   };
@@ -370,5 +419,5 @@ export async function runBacktest(
 ): Promise<BacktestResult> {
   const def = variantById(variantId);
   const hist = await fetchHistory(params.symbol, params.assetType, params.timeframe, params.days, log);
-  return runBacktestOnCandles(hist.candles, params, def.mode, log, onProgress, hist.source, def.advQuality);
+  return runBacktestOnCandles(hist.candles, params, def.mode, log, onProgress, hist.source, def.advQuality, def.slShield);
 }

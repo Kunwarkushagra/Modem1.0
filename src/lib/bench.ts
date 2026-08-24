@@ -10,12 +10,16 @@ import { loadLS, saveLS, TF_MINUTES } from "./utils";
 
 type Log = (msg: string, kind?: "info" | "ok" | "warn" | "err") => void;
 
-/** The four pre-registered windows — SAME windows for both variants. */
+/**
+ * Legacy 90d windows — CONTAMINATED. Excluded from all runs and decisions; nothing may
+ * auto-revert based on them. The eff2-slg protocol uses the fresh frozen SMOKE/POWERED
+ * windows defined in benchConfig.ts instead.
+ */
 export const BENCH_WINDOWS: BenchWindowSpec[] = [
-  { symbol: "BTCUSDT", assetType: "crypto", timeframe: "1h", days: 90, label: "BTC · 1H · 90D" },
-  { symbol: "ETHUSDT", assetType: "crypto", timeframe: "1h", days: 90, label: "ETH · 1H · 90D" },
-  { symbol: "SOLUSDT", assetType: "crypto", timeframe: "1h", days: 90, label: "SOL · 1H · 90D" },
-  { symbol: "BTCUSDT", assetType: "crypto", timeframe: "15m", days: 90, label: "BTC · 15M · 90D" },
+  { symbol: "BTCUSDT", assetType: "crypto", timeframe: "1h", days: 90, label: "BTC · 1H · 90D", contaminated: true },
+  { symbol: "ETHUSDT", assetType: "crypto", timeframe: "1h", days: 90, label: "ETH · 1H · 90D", contaminated: true },
+  { symbol: "SOLUSDT", assetType: "crypto", timeframe: "1h", days: 90, label: "SOL · 1H · 90D", contaminated: true },
+  { symbol: "BTCUSDT", assetType: "crypto", timeframe: "15m", days: 90, label: "BTC · 15M · 90D", contaminated: true },
 ];
 
 const SEG_ORDER: BenchSegment[] = ["CAL", "VAL", "OOS"];
@@ -209,16 +213,20 @@ export async function runBenchmark(
 ): Promise<BenchReport> {
   const t0 = performance.now();
   const report: BenchReport = { ranAt: Date.now(), elapsedMs: 0, aborted: false, windows: [], advFrequencyOk: null };
-  for (let wi = 0; wi < BENCH_WINDOWS.length; wi++) {
+  const runnable = BENCH_WINDOWS.filter((w) => !w.contaminated);
+  if (runnable.length === 0) {
+    log("All legacy 90d windows are CONTAMINATED and excluded — no auto-revert will be based on them. Use the SMOKE/POWERED frozen windows (bench config).", "warn");
+  }
+  for (let wi = 0; wi < runnable.length; wi++) {
     if (isAborted?.()) { report.aborted = true; break; }
     try {
-      const wr = await runBenchWindow(BENCH_WINDOWS[wi], log, (p) => onRunProgress?.(wi, p));
+      const wr = await runBenchWindow(runnable[wi], log, (p) => onRunProgress?.(wi, p));
       report.windows.push(wr);
       report.advFrequencyOk = computeAdvFrequencyOk(report);
       saveBenchReport(report);
       onWindow(wr, wi);
     } catch (e) {
-      log(`window ${BENCH_WINDOWS[wi].label} failed: ${e instanceof Error ? e.message : "unknown"}`, "err");
+      log(`window ${runnable[wi].label} failed: ${e instanceof Error ? e.message : "unknown"}`, "err");
       report.aborted = true;
       break;
     }

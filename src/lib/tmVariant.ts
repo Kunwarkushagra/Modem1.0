@@ -73,6 +73,8 @@ export const TM_VARIANTS: TmVariantDef[] = [
     short: "BASE",
     mode: "classic",
     advQuality: false,
+    eff2: false,
+    slShield: false,
     management: "Full position: TP1 (next liquidity/SR, floor 2.05R) → SL to breakeven → TP2 (2nd pool / range extreme, floor 2.8R→3.2R). 60-bar time mark.",
     partial: null,
     runner: "—",
@@ -86,6 +88,8 @@ export const TM_VARIANTS: TmVariantDef[] = [
     short: "TM-1.1",
     mode: "tm110",
     advQuality: false,
+    eff2: false,
+    slShield: false,
     management: TM110_MANAGEMENT,
     partial: { atR: 1.0, closePct: 50, thenSl: "breakeven" },
     runner: TM110_RUNNER,
@@ -99,6 +103,8 @@ export const TM_VARIANTS: TmVariantDef[] = [
     short: "ADV-1.2",
     mode: "tm110",
     advQuality: true,
+    eff2: false,
+    slShield: false,
     management: TM110_MANAGEMENT,
     partial: { atR: 1.0, closePct: 50, thenSl: "breakeven" },
     runner: TM110_RUNNER,
@@ -111,6 +117,39 @@ export const TM_VARIANTS: TmVariantDef[] = [
       "OB impulse: max(body, wick) displacement ≥1.8×ATR (wick-inclusive detection)",
       "Fakeout-reversal class: displacement close back through swept level within 3 candles → false-BO score 10 (sweep 7, neutral 6)",
       "Sessions in IST: Asia 07:00–13:30 · London 13:30–16:30 · NY 19:00–22:00 · bonuses unchanged",
+    ],
+  },
+  {
+    id: "scalp10-eff2-slg-v1.0.0",
+    label: "EFF2·SLG v1.0.0",
+    short: "EFF2-SLG",
+    mode: "tm110",
+    advQuality: false,
+    eff2: true,
+    slShield: true,
+    management:
+      "tm110 base (partial@1R → SL@BE → runner · 60-bar time exit) PLUS SL-Shield execution: " +
+      "maker-limit entry at zone edge (3-candle fill window, cancel if chased ≥0.5R) gated by a " +
+      "confirmation candle (directional close, body ≥60% of range); stale-momentum exit if +0.5R not " +
+      "reached within 12 candles. Wide structural SL, costs on every leg, no lookahead.",
+    partial: { atR: 1.0, closePct: 50, thenSl: "breakeven" },
+    runner: TM110_RUNNER,
+    timeExitBars: 60,
+    costs: COSTS_LINE + " · entry leg maker (limit) · partial/runner exit legs 50% weight",
+    qualityLayers: [
+      "EFF-2.0 (Part A) — positive-only ranking boosts, cap +15, no penalties, no vetoes:",
+      "  +5 reclaim strength (sweep/reclaim closes ≥0.2×ATR beyond swept level)",
+      "  +5 volume dry-up (pre-sweep 10–20 bar avg < 0.7×20-bar avg)",
+      "  +5 session (London 13:30–16:30 IST or NY 19:00–22:00 IST)",
+      "  +5 HTF alignment (direction agrees with 1H/4H HTF bias)",
+      "  +5 displacement quality (displacement body ≥1.2×ATR)",
+      "  +5 pool significance (primary pool significance score ≥60)",
+      "  ranked = min(100, base + boosts) — ranking/display only, floors still use base",
+      "SL-Shield (Part B) — execution-side, reduces SL hits, no hard vetoes on the setup:",
+      "  confirmation trigger: directional close body ≥60% range within 3 candles else miss:no-confirmation",
+      "  maker-limit entry at zone edge; cancel (miss:limit-chased) if ≥0.5R move unfilled in 3 candles",
+      "  reclaim-speed: trap score +3 if sweep reclaims within ≤2 candles (ranking only)",
+      "  stale-momentum exit at 12th candle close if +0.5R not reached (tag stale)",
     ],
   },
 ];
@@ -131,3 +170,30 @@ export const PASS_THRESHOLDS = [
 ] as const;
 
 export const MIN_VAL_TRADES = 60;
+
+/* ---------------- eff2-slg v1.0.0 frequency guard (corrected floors) ----------------
+ * floor = max(0.8 × baseline trades, min(cap, baseline trades)).
+ * The min(cap, baseline) term means a low-frequency baseline can never force the variant
+ * above the baseline's own output. Smoke cap = 30, powered cap = 50.
+ */
+export const EFF2_SMOKE = { ratio: 0.8, cap: 30 } as const;
+export const EFF2_POWERED = { ratio: 0.8, cap: 50, minValTrades: 60 } as const;
+
+export function eff2Floor(baselineTrades: number, phase: "smoke" | "powered"): number {
+  const cap = phase === "smoke" ? EFF2_SMOKE.cap : EFF2_POWERED.cap;
+  return Math.max(EFF2_SMOKE.ratio * baselineTrades, Math.min(cap, baselineTrades));
+}
+
+export const LS_EFF2_KEY = "tv_eff2_smoke_v1";
+
+/** null = no smoke evidence yet — variant stays OFF by default until a smoke PASS is stored. */
+export function loadEff2Gate(): FrequencyGate {
+  try {
+    const r = loadLS<{ overallPass?: boolean; freqPass?: boolean; slPass?: boolean } | null>(LS_EFF2_KEY, null);
+    if (!r) return { ok: null, detail: "eff2-slg OFF — no smoke test stored; run SMOKE to qualify" };
+    if (r.overallPass) return { ok: true, detail: "eff2-slg smoke PASS (frequency + SL-hit guard) — variant qualified" };
+    return { ok: false, detail: "eff2-slg smoke FAIL — additions reverted until a passing smoke run" };
+  } catch {
+    return { ok: null, detail: "eff2-slg gate unreadable" };
+  }
+}

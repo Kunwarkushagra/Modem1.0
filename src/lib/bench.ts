@@ -1,7 +1,9 @@
 import type {
   BacktestTrade, BenchReport, BenchSegment, BenchWindowReport, BenchWindowSpec, SegmentStats,
-  ThresholdCheck,
+  ThresholdCheck, Timeframe,
 } from "./types";
+import { contaminationNotice, describeConfig, SMOKE_CONFIG } from "./benchConfig";
+import type { PhaseConfig } from "./benchConfig";
 import { fetchHistory } from "./marketData";
 import { runBacktestOnCandles } from "./backtest";
 import { BASELINE_VARIANT, freqFloor, LS_BENCH_KEY, MIN_VAL_TRADES, PASS_THRESHOLDS, TEST_VARIANT, TM_VARIANTS } from "./tmVariant";
@@ -83,7 +85,7 @@ export function computeSegmentStats(segment: BenchSegment, trades: BacktestTrade
   };
 }
 
-function evaluateThresholds(v: SegmentStats, b: SegmentStats): { checks: ThresholdCheck[]; verdict: BenchWindowReport["verdict"] } {
+function evaluateThresholds(v: SegmentStats, b: SegmentStats, minVal: number = MIN_VAL_TRADES): { checks: ThresholdCheck[]; verdict: BenchWindowReport["verdict"] } {
   const f2 = (x: number) => (x >= 0 ? "+" : "") + x.toFixed(3);
   const checks: ThresholdCheck[] = [
     {
@@ -107,26 +109,36 @@ function evaluateThresholds(v: SegmentStats, b: SegmentStats): { checks: Thresho
       pass: v.grossPerTrade >= 0.9 * b.grossPerTrade,
     },
   ];
-  const insufficient = v.trades < MIN_VAL_TRADES;
+  const insufficient = v.trades < minVal;
   const verdict: BenchWindowReport["verdict"] = insufficient
     ? "INSUFFICIENT"
     : checks.every((c) => c.pass) ? "PASS" : "FAIL";
   return { checks, verdict };
 }
 
+export interface WindowOpts {
+  /** config-driven frequency floor; default = legacy max(0.8 × baseline, 50) */
+  floorFn?: (baselineTrades: number) => number;
+  /** override the INSUFFICIENT sample gate (default MIN_VAL_TRADES) */
+  minValTrades?: number;
+}
+
 async function runBenchWindow(
   w: BenchWindowSpec,
   log: Log,
   onRunProgress?: (pct: number) => void,
+  opts: WindowOpts = {},
 ): Promise<BenchWindowReport> {
   const t0 = performance.now();
-  log(`── window ${w.label}: fetching shared candles…`);
-  const hist = await fetchHistory(w.symbol, w.assetType, w.timeframe, w.days, log, 12000);
+  log(`── window ${w.label}: fetching shared candles${w.endTs ? ` (frozen, ends ${new Date(w.endTs).toISOString().slice(0, 10)})` : ""}…`);
+  // candle budget sized for the window (365d × 15M ≈ 35k) so long frozen windows aren't truncated
+  const maxCandles = Math.min(60000, Math.ceil((w.days * 1440) / TF_MINUTES[w.timeframe]) + 400);
+  const hist = await fetchHistory(w.symbol, w.assetType, w.timeframe, w.days, log, maxCandles, w.endTs);
   const candles = hist.candles;
   const stepMs = TF_MINUTES[w.timeframe] * 60_000;
   const t0ts = candles[0].t;
   const tEnd = candles[candles.length - 1].t + stepMs;
-  log(`window ${w.label}: ${candles.length} candles from ${hist.source} — both variants run on this exact series`, "ok");
+  log(`window ${w.label}: ${candles.length} candles from ${hist.source} — all variants run on this exact series`, "ok");
 
   const segments = {} as Record<TmVariantId, SegmentStats[]>;
   const fullRun = {} as Record<TmVariantId, number>;
@@ -139,27 +151,29 @@ async function runBenchWindow(
       (p) => onRunProgress?.(p),
       hist.source,
       v.advQuality,
+      v.slShield,
     );
     fullRun[v.id] = res.trades.length; // full-run closed trades (incl. time-marked) — pre-split
+    log(`window ${w.label}: ${v.short} → ${res.trades.length} trades · WR ${res.winRate.toFixed(0)}% · net/t ${res.netPerTrade.toFixed(3)}R${v.slShield ? ` · misses ${res.missNoConfirm + res.missLimitChase + res.missLimitUnfilled} · stale ${res.staleExits}` : ""}`);
     const split = splitTrades(res.trades, t0ts, tEnd);
     segments[v.id] = SEG_ORDER.map((seg) => computeSegmentStats(seg, split[seg], w.days * (seg === "CAL" ? 0.6 : 0.2)));
   }
 
-  // variant under test = newest (ADV v1.2.0); reference = BASELINE v1.0.0
+  // variant under test = newest in the registry; reference = BASELINE v1.0.0
   const vVal = segments[TEST_VARIANT.id][1];
   const bVal = segments[BASELINE_VARIANT.id][1];
-  const { checks, verdict: valVerdict } = evaluateThresholds(vVal, bVal);
+  const { checks, verdict: valVerdict } = evaluateThresholds(vVal, bVal, opts.minValTrades ?? MIN_VAL_TRADES);
 
-  /* ---- FREQUENCY GUARD: full-run closed trades must stay ≥ max(0.8 × baseline, 50) ---- */
+  /* ---- FREQUENCY GUARD: full-run closed trades must stay ≥ config floor (mechanism unchanged) ---- */
   const baselineTrades = fullRun[BASELINE_VARIANT.id];
   const advTrades = fullRun[TEST_VARIANT.id];
-  const floor = freqFloor(baselineTrades);
+  const floor = (opts.floorFn ?? freqFloor)(baselineTrades);
   const guardPass = advTrades >= floor;
   const freqGuard = { baselineTrades, advTrades, floor: Number(floor.toFixed(1)), pass: guardPass };
   checks.push({
     id: "T5",
-    label: `FREQUENCY GUARD — full-run trades ≥ max(0.8 × baseline, 50)`,
-    detail: `${advTrades} adv vs ${baselineTrades} baseline · floor ${floor.toFixed(1)}`,
+    label: `FREQUENCY GUARD — full-run trades ≥ max(0.8 × baseline, min(${opts.floorFn ? "config cap" : "50"}, baseline))`,
+    detail: `${advTrades} variant vs ${baselineTrades} baseline · floor ${floor.toFixed(1)}`,
     pass: guardPass,
   });
   const verdict: BenchWindowReport["verdict"] = !guardPass ? "FAIL" : valVerdict;
@@ -205,28 +219,51 @@ export function computeAdvFrequencyOk(report: Pick<BenchReport, "aborted" | "win
  * A guard failure marks the advanced variant FAIL and — via loadFrequencyGate() —
  * suspends its soft additions in live signal generation until a passing run is stored.
  */
+const baseOf = (s: string) => s.replace(/USDT$/, "");
+
+/** Build the frozen window list for a phase: one window per symbol on the primary TF, plus a secondary-TF window per symbol when configured. */
+export function buildPhaseWindows(c: PhaseConfig): BenchWindowSpec[] {
+  const out: BenchWindowSpec[] = [];
+  const mk = (sym: string, tf: Timeframe, tag: string): BenchWindowSpec => ({
+    symbol: sym, assetType: "crypto", timeframe: tf, days: c.days,
+    label: `${baseOf(sym)} · ${tf.toUpperCase()} · ${c.days}D${tag}`,
+    endTs: c.anchorEnd,
+  });
+  for (const s of c.symbols) out.push(mk(s, c.timeframe, ""));
+  if (c.secondaryTimeframe) for (const s of c.symbols) out.push(mk(s, c.secondaryTimeframe, " · 2ND"));
+  return out;
+}
+
 export async function runBenchmark(
   log: Log,
   onWindow: (report: BenchWindowReport, index: number) => void,
   onRunProgress?: (windowIndex: number, pct: number) => void,
   isAborted?: () => boolean,
+  config: PhaseConfig = SMOKE_CONFIG,
 ): Promise<BenchReport> {
   const t0 = performance.now();
   const report: BenchReport = { ranAt: Date.now(), elapsedMs: 0, aborted: false, windows: [], advFrequencyOk: null };
-  const runnable = BENCH_WINDOWS.filter((w) => !w.contaminated);
-  if (runnable.length === 0) {
-    log("All legacy 90d windows are CONTAMINATED and excluded — no auto-revert will be based on them. Use the SMOKE/POWERED frozen windows (bench config).", "warn");
-  }
-  for (let wi = 0; wi < runnable.length; wi++) {
+
+  // print the ACTIVE CONFIG (variant slot, windows, TF, floor) BEFORE any run
+  log(contaminationNotice(), "warn");
+  for (const line of describeConfig(config)) log(line, "info");
+
+  const windows = buildPhaseWindows(config);
+  log(`bench: ${windows.length} frozen window(s) queued for ${config.variantSlot} vs ${config.baselineSlot}`, "info");
+
+  for (let wi = 0; wi < windows.length; wi++) {
     if (isAborted?.()) { report.aborted = true; break; }
     try {
-      const wr = await runBenchWindow(runnable[wi], log, (p) => onRunProgress?.(wi, p));
+      const wr = await runBenchWindow(
+        windows[wi], log, (p) => onRunProgress?.(wi, p),
+        { floorFn: config.floor, minValTrades: config.minValTrades ?? MIN_VAL_TRADES },
+      );
       report.windows.push(wr);
       report.advFrequencyOk = computeAdvFrequencyOk(report);
       saveBenchReport(report);
       onWindow(wr, wi);
     } catch (e) {
-      log(`window ${runnable[wi].label} failed: ${e instanceof Error ? e.message : "unknown"}`, "err");
+      log(`window ${windows[wi].label} failed: ${e instanceof Error ? e.message : "unknown"}`, "err");
       report.aborted = true;
       break;
     }
@@ -236,9 +273,9 @@ export async function runBenchmark(
   report.ranAt = Date.now();
   saveBenchReport(report);
   if (report.advFrequencyOk === false) {
-    log("FREQUENCY GUARD FAILED — scalp10-adv-v1.2.0 soft layers are REVERTED in live scanning until a passing benchmark", "err");
+    log(`FREQUENCY GUARD FAILED — ${config.variantSlot} additions are REVERTED in live scanning until a passing benchmark`, "err");
   } else if (report.advFrequencyOk === true) {
-    log("FREQUENCY GUARD PASSED — adv v1.2.0 soft layers remain live", "ok");
+    log(`FREQUENCY GUARD PASSED — ${config.variantSlot} additions remain live`, "ok");
   }
   return report;
 }

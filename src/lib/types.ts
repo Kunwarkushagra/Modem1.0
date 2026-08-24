@@ -549,6 +549,8 @@ export interface BenchWindowSpec {
   label: string;
   /** legacy windows are contaminated — excluded from all runs and decisions */
   contaminated?: boolean;
+  /** frozen window anchor (epoch ms) — history ends AT this instant for reproducible benches */
+  endTs?: number;
 }
 
 export interface BenchWindowReport {

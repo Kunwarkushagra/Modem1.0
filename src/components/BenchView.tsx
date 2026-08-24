@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { BenchReport, BenchSegment, BenchWindowReport, LogLine, SegmentStats, TmVariantId } from "../lib/types";
-import { BENCH_WINDOWS, loadBenchReport, runBenchmark } from "../lib/bench";
+import { buildPhaseWindows, loadBenchReport, runBenchmark } from "../lib/bench";
+import { describeConfig, POWERED_CONFIG, SMOKE_CONFIG } from "../lib/benchConfig";
+import type { PhaseConfig } from "../lib/benchConfig";
 import {
-  BASELINE_VARIANT, FREQUENCY_GUARD, loadFrequencyGate, MIN_VAL_TRADES, PASS_THRESHOLDS,
+  BASELINE_VARIANT, loadFrequencyGate, MIN_VAL_TRADES, PASS_THRESHOLDS,
   TEST_VARIANT, TM_VARIANTS, variantById,
 } from "../lib/tmVariant";
 import { cls, fmtIST } from "../lib/utils";
@@ -117,8 +119,12 @@ export function BenchView() {
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<{ wi: number; pct: number } | null>(null);
+  const [phase, setPhase] = useState<"SMOKE" | "POWERED">("SMOKE");
   const abortRef = useRef(false);
   const logRef = useRef<HTMLDivElement>(null);
+
+  const config: PhaseConfig = phase === "SMOKE" ? SMOKE_CONFIG : POWERED_CONFIG;
+  const configWindows = buildPhaseWindows(config);
 
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs]);
 
@@ -132,18 +138,18 @@ export function BenchView() {
     abortRef.current = false;
     setLogs([]);
     setProgress({ wi: 0, pct: 0 });
-    pushLog(`benchmark start — ${BENCH_WINDOWS.length} windows × ${TM_VARIANTS.length} variants · shared candles per window`);
-    pushLog(`frequency guard armed: adv full-run trades must stay ≥ max(${FREQUENCY_GUARD.ratio}×baseline, ${FREQUENCY_GUARD.minTrades})`);
+    pushLog(`benchmark start — PHASE ${config.phase} · ${configWindows.length} windows × ${TM_VARIANTS.length} variants · shared candles per window`);
     try {
       const r = await runBenchmark(
         (msg, kind) => pushLog(msg, kind ?? "info"),
         (wr) => setReport((prev) => ({ ...(prev as BenchReport), ranAt: Date.now(), elapsedMs: 0, aborted: false, windows: [...(prev?.windows ?? []).filter((x) => x.window.label !== wr.window.label), wr], advFrequencyOk: prev?.advFrequencyOk ?? null })),
         (wi, pct) => setProgress({ wi, pct }),
         () => abortRef.current,
+        config,
       );
       setReport(r);
-      if (r.advFrequencyOk === false) toast.push("err", "Frequency guard FAILED — adv v1.2.0 soft layers reverted in live scanning");
-      else if (r.advFrequencyOk === true) toast.push("ok", "Frequency guard PASSED — adv v1.2.0 soft layers stay live");
+      if (r.advFrequencyOk === false) toast.push("err", `Frequency guard FAILED — ${config.variantSlot} reverted in live scanning`);
+      else if (r.advFrequencyOk === true) toast.push("ok", `Frequency guard PASSED — ${config.variantSlot} stays live`);
       else toast.push("info", "Benchmark finished — guard inconclusive (aborted or empty)");
     } catch (e) {
       pushLog(`benchmark error: ${e instanceof Error ? e.message : "unknown"}`, "err");
@@ -151,7 +157,7 @@ export function BenchView() {
       setRunning(false);
       setProgress(null);
     }
-  }, [running, pushLog, toast]);
+  }, [running, pushLog, toast, config, configWindows.length]);
 
   const gate = loadFrequencyGate();
   const advLive = gate.ok !== false;
@@ -164,12 +170,12 @@ export function BenchView() {
           <span className="flex h-9 w-9 items-center justify-center rounded-md border border-gold-600/50 bg-gold-500/12 text-gold-400"><IScale size={18} /></span>
           <div className="leading-tight">
             <div className="font-display text-base font-extrabold tracking-tight text-fog-100">VARIANT BENCHMARK</div>
-            <div className="font-mono text-[8.5px] tracking-[0.24em] text-fog-500">{BASELINE_VARIANT.label} vs {TEST_VARIANT.label} · 60/20/20 · NET LEDGER</div>
+            <div className="font-mono text-[8.5px] tracking-[0.24em] text-fog-500">{config.variantSlot} vs {config.baselineSlot} · 60/20/20 · NET LEDGER</div>
           </div>
           <div className="ml-auto flex items-center gap-2">
             {running && progress && (
               <span className="font-mono text-[10px] text-gold-300">
-                {BENCH_WINDOWS[progress.wi]?.label ?? ""} · {progress.pct}%
+                {configWindows[progress.wi]?.label ?? ""} · {progress.pct}%
               </span>
             )}
             <Btn variant="primary" size="sm" onClick={() => void run()} disabled={running}>
@@ -177,6 +183,27 @@ export function BenchView() {
             </Btn>
             {running && <Btn variant="ghost" size="sm" onClick={() => { abortRef.current = true; }}><IX size={12} /> ABORT</Btn>}
           </div>
+        </div>
+
+        {/* config selector */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[9px] tracking-[0.18em] text-fog-500">BENCH CONFIG</span>
+          {(["SMOKE", "POWERED"] as const).map((p) => (
+            <button key={p} type="button" onClick={() => { if (!running) { setPhase(p); setReport(null); } }}
+              className={cls("tv-btn rounded border px-3 py-1.5 font-mono text-[10px] font-bold tracking-wider",
+                phase === p ? "border-gold-600 bg-gold-500/15 text-gold-300" : "border-ink-600 text-fog-400 hover:text-fog-200")}>
+              {p === "SMOKE" ? "SMOKE · BTC/ETH/SOL · 15M · 30D" : "POWERED · 10 SYM · 365D · 15M+1H"}
+            </button>
+          ))}
+          <span className="font-mono text-[9px] text-fog-500">default = SMOKE · active config printed below before every run</span>
+        </div>
+
+        {/* ACTIVE CONFIG — printed verbatim before any run */}
+        <div className="rounded-md border border-info-500/30 bg-info-500/6 px-3.5 py-2.5">
+          <div className="mb-1 font-mono text-[9px] font-bold tracking-[0.18em] text-info-400">ACTIVE CONFIG ({phase})</div>
+          {describeConfig(config).map((line) => (
+            <div key={line} className="font-mono text-[9.5px] leading-relaxed text-fog-300">{line}</div>
+          ))}
         </div>
 
         {/* the guard, stated plainly */}
@@ -188,14 +215,14 @@ export function BenchView() {
             FREQUENCY GUARD — {gate.ok === false ? "ADV REVERTED" : gate.ok === true ? "ADV LIVE" : "PENDING"}
           </span>
           <span className="font-mono text-[10px] text-fog-400">
-            rule: adv full-run closed trades ≥ max({FREQUENCY_GUARD.ratio} × baseline, {FREQUENCY_GUARD.minTrades}) per window · else variant FAILS and all soft additions revert
+            rule: variant full-run closed trades ≥ max(0.8 × baseline, min({config.floorCap}, baseline)) per window · else variant FAILS and additions revert
           </span>
           <span className={cls("ml-auto font-mono text-[10px] font-bold tracking-wider", advLive ? "text-bull-400" : "text-bear-400")}>
             SOFT LAYERS: {advLive ? "ACTIVE" : "SUSPENDED"}
           </span>
         </div>
         <p className="font-mono text-[9px] leading-relaxed text-fog-500">
-          {gate.detail} · VAL pass needs ≥ {MIN_VAL_TRADES} trades else INSUFFICIENT — NO CONCLUSION · thresholds {PASS_THRESHOLDS.map((t) => t.id).join(" / ")} evaluated on VAL, guard on the full run.
+          {gate.detail} · VAL pass needs ≥ {config.minValTrades ?? MIN_VAL_TRADES} trades else INSUFFICIENT — NO CONCLUSION · thresholds {PASS_THRESHOLDS.map((t) => t.id).join(" / ")} evaluated on VAL, guard on the full run · legacy 90d windows excluded (contaminated).
         </p>
       </div>
 
@@ -205,8 +232,8 @@ export function BenchView() {
           <IScale size={30} className="text-fog-500" />
           <p className="font-display text-lg font-extrabold tracking-tight text-fog-200">NO BENCHMARK YET</p>
           <p className="max-w-lg text-sm leading-relaxed text-fog-400">
-            Run the benchmark to pit {TEST_VARIANT.label} against {BASELINE_VARIANT.label} on {BENCH_WINDOWS.length} identical windows.
-            The frequency guard decides whether the advanced soft layers stay live or get reverted.
+            Run the {phase} benchmark to pit {config.variantSlot} against {config.baselineSlot} on {configWindows.length} frozen window(s).
+            The frequency guard decides whether the additions stay live or get reverted.
           </p>
         </div>
       ) : (

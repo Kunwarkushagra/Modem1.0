@@ -103,9 +103,17 @@ export function contaminationNotice(): string {
  * Guard = EXACT entry-count equality vs baseline (the entry pipeline must be untouched).
  */
 const RUNNER_ANCHOR = Date.UTC(2026, 2, 1, 0, 0, 0); // 2026-03-01 00:00 UTC (fresh)
+const COURSEEDGE_ANCHOR = RUNNER_ANCHOR;             // same fresh window → directly comparable
 
-export interface RunnerSmokeConfig {
-  phase: "RUNNER-SMOKE";
+/**
+ * Variant smoke config. `kind` describes what the variant changes vs baseline:
+ *   - "exit":    exit-management only (runner) — equality guard still applies
+ *   - "scoring": positive-only radar scoring boosts (courseedge) — entry pipeline byte-identical
+ * Either way the GUARD is exact entry-count equality vs baseline.
+ */
+export interface VariantSmokeConfig {
+  phase: string;
+  kind: "exit" | "scoring";
   variantSlot: string;
   baselineSlot: string;
   symbols: string[];
@@ -113,9 +121,11 @@ export interface RunnerSmokeConfig {
   days: number;
   anchorEnd: number;
 }
+export type RunnerSmokeConfig = VariantSmokeConfig; // back-compat alias
 
-export const RUNNER_SMOKE: RunnerSmokeConfig = {
+export const RUNNER_SMOKE: VariantSmokeConfig = {
   phase: "RUNNER-SMOKE",
+  kind: "exit",
   variantSlot: "scalp10-runner-v1.0.0",
   baselineSlot: BASELINE_SLOT,
   symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
@@ -124,13 +134,25 @@ export const RUNNER_SMOKE: RunnerSmokeConfig = {
   anchorEnd: RUNNER_ANCHOR,
 };
 
-export function describeRunnerConfig(c: RunnerSmokeConfig): string[] {
+export const COURSEEDGE_SMOKE: VariantSmokeConfig = {
+  phase: "COURSEEDGE-SMOKE",
+  kind: "scoring",
+  variantSlot: "scalp10-courseedge-v1.0.0",
+  baselineSlot: BASELINE_SLOT,
+  symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+  timeframe: "15m",
+  days: 30,
+  anchorEnd: COURSEEDGE_ANCHOR,
+};
+
+export function describeVariantSmoke(c: VariantSmokeConfig): string[] {
   const start = c.anchorEnd - c.days * 86_400_000;
   return [
     `PHASE ${c.phase} · VARIANT SLOT: ${c.variantSlot} · BASELINE: ${c.baselineSlot}`,
     `FROZEN WINDOW: ${iso(start)} → ${iso(c.anchorEnd)} (${c.days}d, anchor ${c.anchorEnd})`,
     `SYMBOLS (${c.symbols.length}): ${c.symbols.join(" ")}`,
-    `SETUP TF: ${c.timeframe.toUpperCase()} · EXIT-MANAGEMENT ONLY (entry pipeline = baseline)`,
+    `SETUP TF: ${c.timeframe.toUpperCase()} · ${c.kind === "exit" ? "EXIT-MANAGEMENT ONLY" : "SCORING-ONLY (radar boosts)"} — entry pipeline = baseline`,
     `GUARD: EXACT entry-count equality vs baseline — any drift reverts the variant`,
   ];
 }
+export const describeRunnerConfig = describeVariantSmoke; // back-compat

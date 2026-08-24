@@ -10,7 +10,7 @@ import { getTop30, putTop30, TOP30_TTL_MS } from "../lib/cache";
 import { applyUniverseGuards, parseExtraExcludes } from "../lib/universe";
 import type { ExcludedEntry, UniverseCfg } from "../lib/universe";
 import { addTrade, loadTrades } from "../lib/journal";
-import { loadFrequencyGate, TM_VARIANTS, variantById } from "../lib/tmVariant";
+import { loadCourseEdgeGate, loadFrequencyGate, TM_VARIANTS, variantById } from "../lib/tmVariant";
 import { cls, fmtIST, fmtPrice, fmtTime, TF_MINUTES } from "../lib/utils";
 import { Badge, Btn, Card, IBrain, ICandles, ICheck, IPlus, IRadar, IRefresh, IWarn, IX, Segmented, useToast } from "./ui";
 
@@ -604,6 +604,8 @@ export function RadarView(props: {
   const advActive = variantById(settings.radarTmVariant).advQuality && loadFrequencyGate().ok !== false;
   /* eff2-slg v1.0.0: Part A positive-only ranking boosts ride the radar when that variant is selected */
   const eff2Active = variantById(settings.radarTmVariant).eff2;
+  /* courseedge v1.0.0: pattern boosts ride the radar only while that variant is selected AND its smoke gate passed (or is pending — display layer) */
+  const courseEdgeActive = variantById(settings.radarTmVariant).courseEdge && loadCourseEdgeGate().ok !== false;
   const onScanResult = useCallback((res: ReturnType<typeof scanSymbol> extends Promise<infer R> ? R : never) => {
     htfRef.current[res.state.symbol] = res.htfBias;
     setUniverse((u) => ({ ...u, [res.state.symbol]: res.state }));
@@ -620,7 +622,7 @@ export function RadarView(props: {
     if (manual) setManualScanning(true);
     setProgress({ done: 0, total: list.length, current: list[0] });
     const res = await scanUniverse(
-      list, tf, scanFloor, advActive, eff2Active,
+      list, tf, scanFloor, advActive, eff2Active, courseEdgeActive,
       onScanResult,
       (p) => setProgress(p),
       onScanFail,

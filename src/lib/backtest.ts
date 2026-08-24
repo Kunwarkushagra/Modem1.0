@@ -1,6 +1,6 @@
 import type {
-  AnalyzeParams, BacktestResult, BacktestTrade, Candle, CostModel, ExpiryLogItem, ExitKind,
-  PerformanceSummary, SignalType, TmMode, TradeOutcome,
+  AnalyzeParams, BacktestResult, BacktestTrade, Bias, Candle, CostModel, ExpiryLogItem, ExitKind,
+  PerformanceSummary, SignalType, SMCAnalysis, TmMode, TradeOutcome, TradeSetup,
 } from "./types";
 import { fetchHistory } from "./marketData";
 import { computeIndicators, atr } from "./indicators";
@@ -500,4 +500,45 @@ export async function runBacktest(
   const def = variantById(variantId);
   const hist = await fetchHistory(params.symbol, params.assetType, params.timeframe, params.days, log);
   return runBacktestOnCandles(hist.candles, params, def.mode, log, onProgress, hist.source, def.advQuality, def.slShield);
+}
+
+export interface SampledSetup {
+  setup: TradeSetup;
+  window: Candle[];       // confirmed candles up to the generation point (for pattern rescoring)
+  atr: number[];
+  smc: SMCAnalysis;
+  htfBias: Bias;
+  price: number;
+}
+
+/**
+ * Sample VALIDATED setups at the exact engine generation cadence (lookback 220, step ≈ len/160),
+ * without executing them. Used by smoke tests to measure scoring-layer impact (e.g. courseedge
+ * pattern boosts) on the identical setups the entry pipeline produces. Generation-only — no fills.
+ */
+export function collectEngineSetups(candles: Candle[], params: BacktestParams, advQuality = false): SampledSetup[] {
+  const stepMs = TF_MINUTES[params.timeframe] * 60_000;
+  const lookback = 220;
+  const end = candles.length - 2;
+  const step = Math.max(4, Math.round(candles.length / 160));
+  const out: SampledSetup[] = [];
+  for (let i = lookback; i < end; i++) {
+    if ((i - lookback) % step !== 0) continue;
+    const window = candles.slice(0, i + 1);
+    const ind = computeIndicators(window);
+    const smc = analyzeSMC(window, advQuality);
+    const htfBias = deriveBias(smc, ind, window);
+    const generatedAt = candles[i].t + stepMs;
+    const ctx: EngineCtx = {
+      params: { symbol: params.symbol, assetType: params.assetType, timeframe: params.timeframe, accountSize: 10000, riskPercent: 1 },
+      candles: window, ind, smc, htfSmc: smc, htfInd: ind, htfCandles: window,
+      htfBias, perf: EMPTY_PERF, newsCount: 0, generatedAt, stepMs,
+    };
+    const raw = localSetups(ctx).slice(0, 1);
+    if (!raw.length) continue;
+    const setup = validateSetup(raw[0], ctx);
+    if (!setup.validation.checks.every((ch) => ch.passed)) continue;
+    out.push({ setup, window, atr: ind.atr, smc, htfBias, price: window[window.length - 1].c });
+  }
+  return out;
 }

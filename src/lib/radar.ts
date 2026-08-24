@@ -1,5 +1,5 @@
 import type {
-  AssetType, Bias, Candle, InvalidCheck, PerformanceSummary, RadarCandidate, RadarScoreBreakdown,
+  AssetType, Bias, Candle, CourseEdgeHits, InvalidCheck, PerformanceSummary, RadarCandidate, RadarScoreBreakdown,
   RadarTf, ScanFunnel, SymbolScanState, TradeSetup,
 } from "./types";
 import { fetchCandles } from "./marketData";
@@ -8,6 +8,7 @@ import { analyzeSMC } from "./smc";
 import { deriveBias, localSetups, validateSetup } from "./ai";
 import type { EngineCtx } from "./ai";
 import { getCandles, putCandles } from "./cache";
+import { scoreCourseEdge } from "./courseEdge";
 import { detectSession, fmtPrice, HTF_MAP, last, normSymbol, TF_MINUTES } from "./utils";
 
 const EMPTY_PERF: PerformanceSummary = {
@@ -18,7 +19,7 @@ const EMPTY_PERF: PerformanceSummary = {
 
 /* ------------------------------------------------ scoring (Σ = 100) */
 
-export function scoreCandidate(setup: TradeSetup, htfBias: Bias, generatedAt: number, eff2 = false): RadarScoreBreakdown {
+export function scoreCandidate(setup: TradeSetup, htfBias: Bias, generatedAt: number, eff2 = false, hits: CourseEdgeHits | null = null): RadarScoreBreakdown {
   const r = setup.reasoning;
   const dir = setup.direction;
 
@@ -32,7 +33,9 @@ export function scoreCandidate(setup: TradeSetup, htfBias: Bias, generatedAt: nu
     liquidityScore = Math.max(0, liquidityScore);
   }
 
-  const sweepScore = r?.sweep ? Math.round((r.sweep.trapScore / 100) * 15) : 0;
+  // courseedge v1.0.0: a double sweep adds +10 to the TRAP score (via the existing sweep bucket conversion)
+  const trapEff = r?.sweep ? Math.min(100, r.sweep.trapScore + (hits?.doubleSweep?.routedVia === "trap" ? 10 : 0)) : 0;
+  const sweepScore = r?.sweep ? Math.round((trapEff / 100) * 15) : 0;
 
   let structureScore = 0;
   if (r?.structureEvent) {
@@ -68,8 +71,14 @@ export function scoreCandidate(setup: TradeSetup, htfBias: Bias, generatedAt: nu
     if (r?.sweep?.reclaimFast) eff2Boost += 3;                                                                // reclaim speed (Part B rule 3)
     eff2Boost = Math.min(15, eff2Boost);
   }
-  const ranked = Math.min(100, total + eff2Boost);
-  return { htfBias: htfBiasScore, liquidity: liquidityScore, sweep: sweepScore, structure: structureScore, zone: zoneScore, session: sessionScore, falseBreakout: falseBreakoutScore, amd: amdScore, total, eff2: eff2Boost, ranked };
+
+  /* courseedge v1.0.0 — positive-only pattern bucket (compression + wedge + round, capped +20).
+   * The double-sweep bonus already landed in the trap score above when sweep evidence exists.
+   * `total` is untouched → floors stay frequency-neutral; only `ranked` ordering improves. */
+  const courseEdgeBoost = Math.min(20, hits?.totalBonus ?? 0);
+
+  const ranked = Math.min(100, total + eff2Boost + courseEdgeBoost);
+  return { htfBias: htfBiasScore, liquidity: liquidityScore, sweep: sweepScore, structure: structureScore, zone: zoneScore, session: sessionScore, falseBreakout: falseBreakoutScore, amd: amdScore, total, eff2: eff2Boost, courseEdge: courseEdgeBoost, ranked };
 }
 
 /* ------------------------------------------------ per-symbol scan (confirmed candles only) */
@@ -83,7 +92,7 @@ export interface ScanOutcome {
 
 const EMPTY_FUNNEL: ScanFunnel = { generated: 0, passedGates: 0, passedFloor: 0 };
 
-export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: number, advQuality = false, eff2 = false): Promise<ScanOutcome> {
+export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: number, advQuality = false, eff2 = false, courseEdge = false): Promise<ScanOutcome> {
   const symbol = normSymbol(symbolRaw, "crypto");
   const asset: AssetType = "crypto";
   const base: SymbolScanState = { symbol, status: "scanning", lastScanAt: Date.now(), lastCloseEpoch: 0, lastPrice: null, error: null, candidatesFound: 0 };
@@ -144,6 +153,10 @@ export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: n
   const htfSmc = analyzeSMC(htfCD, advQuality);
   const htfBias = deriveBias(htfSmc, htfInd, htfCD);
 
+  /* courseedge v1.0.0: pattern hits come from this symbol/TF snapshot (setup-TF confirmed candles).
+   * The double-sweep bonus routes via the trap score when the individual setup has sweep evidence,
+   * so hits are computed per candidate below. Scoring/ranking only — never a gate. */
+
   const ctx: EngineCtx = {
     params: { symbol, assetType: asset, timeframe: tf, accountSize: 10000, riskPercent: 1 },
     candles: stfC, ind, smc, htfSmc, htfInd, htfCandles: htfCD,
@@ -163,7 +176,10 @@ export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: n
     }
     funnel.passedGates++;
     if (!setup.signal) continue;
-    const score = scoreCandidate(setup, htfBias, generatedAt, eff2);
+    const hits = courseEdge
+      ? scoreCourseEdge(stfC, ind.atr, smc, htfBias, last(stfC).c, Boolean(setup.reasoning?.sweep))
+      : null;
+    const score = scoreCandidate(setup, htfBias, generatedAt, eff2, hits);
     if (score.total < qualityFloor) {                                // quality floor (Settings)
       console.info(`[radar] ${symbol}: candidate below floor (${score.total} < ${qualityFloor})`);
       continue;
@@ -180,6 +196,7 @@ export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: n
       dataStale: stale,
       lastCheckedAt: Date.now(),
       archivedAt: null,
+      courseEdgeHits: hits ?? undefined,
     });
   }
 
@@ -207,6 +224,7 @@ export async function scanUniverse(
   qualityFloor: number,
   advQuality: boolean,
   eff2: boolean,
+  courseEdge: boolean,
   onResult: (res: ScanOutcome) => void,
   onProgress: (p: BatchProgress) => void,
   onFail: (symbol: string, msg: string) => void,
@@ -222,7 +240,7 @@ export async function scanUniverse(
       const sym = symbols[my];
       onProgress({ done, total: symbols.length, current: sym });
       try {
-        const res = await scanSymbol(sym, tf, qualityFloor, advQuality, eff2);
+        const res = await scanSymbol(sym, tf, qualityFloor, advQuality, eff2, courseEdge);
         ok++;
         onResult(res);
       } catch (e) {

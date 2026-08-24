@@ -8,7 +8,7 @@ import { loadLS } from "./utils";
  * base cost model. Only trade MANAGEMENT and (from v1.2.0) additive SOFT quality
  * layers differ. Soft layers never add hard vetoes.
  */
-export type TmVariantId = "baseline-v1.0.0" | "scalp10-tm-v1.1.0" | "scalp10-adv-v1.2.0" | "scalp10-eff2-slg-v1.0.0" | "scalp10-runner-v1.0.0";
+export type TmVariantId = "baseline-v1.0.0" | "scalp10-tm-v1.1.0" | "scalp10-adv-v1.2.0" | "scalp10-eff2-slg-v1.0.0" | "scalp10-runner-v1.0.0" | "scalp10-courseedge-v1.0.0";
 
 /**
  * FREQUENCY GUARD — quality improvements must not collapse trade frequency.
@@ -54,6 +54,8 @@ export interface TmVariantDef {
   eff2: boolean;
   /** eff2-slg v1.0.0 Part B: SL-Shield execution rules (confirmation trigger, maker-limit entry, stale exit) */
   slShield: boolean;
+  /** courseedge v1.0.0: positive-only pattern boosts (compression/wedge/double-sweep/round), bucket cap +20 — ranking only */
+  courseEdge: boolean;
   management: string;
   /** one-line management plan shown on radar cards so paper trades match the backtested management */
   planShort: string;
@@ -77,6 +79,7 @@ export const TM_VARIANTS: TmVariantDef[] = [
     advQuality: false,
     eff2: false,
     slShield: false,
+    courseEdge: false,
     management: "Full position: TP1 (next liquidity/SR, floor 2.05R) → SL to breakeven → TP2 (2nd pool / range extreme, floor 2.8R→3.2R). 60-bar time mark.",
     planShort: "TP1 → SL@BE → TP2 · 60-bar mark",
     partial: null,
@@ -93,6 +96,7 @@ export const TM_VARIANTS: TmVariantDef[] = [
     advQuality: false,
     eff2: false,
     slShield: false,
+    courseEdge: false,
     management: TM110_MANAGEMENT,
     planShort: "50% @ +1R → SL@BE → runner TP2 · 60-bar mark",
     partial: { atR: 1.0, closePct: 50, thenSl: "breakeven" },
@@ -109,6 +113,7 @@ export const TM_VARIANTS: TmVariantDef[] = [
     advQuality: true,
     eff2: false,
     slShield: false,
+    courseEdge: false,
     management: TM110_MANAGEMENT,
     planShort: "50% @ +1R → SL@BE → runner TP2 · 60-bar mark",
     partial: { atR: 1.0, closePct: 50, thenSl: "breakeven" },
@@ -132,6 +137,7 @@ export const TM_VARIANTS: TmVariantDef[] = [
     advQuality: false,
     eff2: true,
     slShield: true,
+    courseEdge: false,
     management:
       "tm110 base (partial@1R → SL@BE → runner · 60-bar time exit) PLUS SL-Shield execution: " +
       "maker-limit entry at zone edge (3-candle fill window, cancel if chased ≥0.5R) gated by a " +
@@ -166,6 +172,7 @@ export const TM_VARIANTS: TmVariantDef[] = [
     advQuality: false,
     eff2: false,
     slShield: false,
+    courseEdge: false,
     management:
       "Exit-management only — entry, gates, V1–V6, initial structural SL, validity, costs and backtest " +
       "methodology are the baseline's, byte-for-byte. Partial: 50% off at +1.0R, SL → breakeven on the rest. " +
@@ -186,6 +193,36 @@ export const TM_VARIANTS: TmVariantDef[] = [
       "  TP2 is an optional milestone, never a forced runner exit",
       "  pre-partial stale cut: full market close at 40 exec candles if +1R not reached (tag stale)",
       "  no time limit on the runner after the partial fills",
+    ],
+  },
+  {
+    id: "scalp10-courseedge-v1.0.0",
+    label: "COURSEEDGE v1.0.0",
+    short: "C-EDGE",
+    mode: "classic", // management = baseline (TP1 → SL@BE → TP2 · 60-bar mark); scoring-only variant
+    advQuality: false,
+    eff2: false,
+    slShield: false,
+    courseEdge: true,
+    management:
+      "Baseline management, byte-for-byte (TP1 → SL@BE → TP2 · 60-bar time mark). This variant adds ONLY positive " +
+      "ranking boosts for four setup-TF patterns — it never changes entries, gates, validators, SL/TP, validity or costs.",
+    planShort: "baseline TM + course-edge pattern boosts (cap +20, ranking only)",
+    partial: null,
+    runner: "—",
+    timeExitBars: 60,
+    costs: COSTS_LINE + " · full weight",
+    qualityLayers: [
+      "COURSE-EDGE (scoring-only) — positive boosts on the setup TF, bucket capped at +20, never a gate or penalty:",
+      "  +8 compression/squeeze continuation: 15-bar slow curve (R²≥0.35, move 0.5–4×ATR) with ATR percentile <40,",
+      "     broken in the HTF trend direction by a candle closing beyond the curve with body >0.8×ATR",
+      "  +8 wedge exhaustion: rising/falling wedge (converging boundaries, depth ≥1×ATR) broken by body >1.0×ATR closing",
+      "     beyond the opposite boundary (rising→down break, falling→up break)",
+      "  +10 replicate/double sweep: same pool swept twice within 20 candles → +10 trap score (sweep bucket) when the",
+      "     setup has sweep evidence, else joins the bucket under the cap",
+      "  +5 psychological round number: price within 0.2% of the nearest 10/100/1k/10k level",
+      "  ranked = min(100, base + eff2 + courseEdge) — ranking/display only; floors & gates still use base",
+      "  FREQUENCY GUARD = exact entry-count equality vs baseline (scoring cannot change entries; any drift reverts)",
     ],
   },
 ];
@@ -251,5 +288,25 @@ export function loadRunnerGate(): FrequencyGate {
     return { ok: false, detail: `runner smoke FAIL — entries drifted (variant ${r.variant?.entries ?? "?"} vs baseline ${r.baseline?.entries ?? "?"}) — reverted` };
   } catch {
     return { ok: null, detail: "runner gate unreadable" };
+  }
+}
+
+export const LS_COURSEEDGE_KEY = "tv_courseedge_smoke_v1";
+
+/**
+ * courseedge v1.0.0 gate — EXACT-ENTRY-EQUALITY guard. Scoring boosts can never change the entry
+ * pipeline, so the variant must produce exactly the baseline's entries; any drift reverts it.
+ * null = no smoke stored yet → the boost is active on the radar (display layer) but the variant
+ * is flagged as unproven until a smoke PASS is stored.
+ */
+export function loadCourseEdgeGate(): FrequencyGate {
+  try {
+    const r = loadLS<{ overallPass?: boolean; entriesEqual?: boolean; baseline?: { entries?: number }; variant?: { entries?: number } } | null>(LS_COURSEEDGE_KEY, null);
+    if (!r) return { ok: null, detail: "courseedge: no smoke stored yet — run COURSEEDGE-SMOKE to prove entry-count equality" };
+    if (r.entriesEqual && r.overallPass)
+      return { ok: true, detail: `courseedge smoke PASS — entries exactly equal baseline (${r.variant?.entries ?? "?"}) — boosts qualified` };
+    return { ok: false, detail: `courseedge smoke FAIL — entries drifted (variant ${r.variant?.entries ?? "?"} vs baseline ${r.baseline?.entries ?? "?"}) — boosts reverted` };
+  } catch {
+    return { ok: null, detail: "courseedge gate unreadable" };
   }
 }

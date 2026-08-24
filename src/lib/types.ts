@@ -277,7 +277,17 @@ export interface RadarScoreBreakdown {
   amd: number;              // adv v1.2.0: +5 when AMD manipulation phase precedes the sweep
   total: number;            // 0–100 (capped) — BASE score; radar floors filter on this (frequency-neutral)
   eff2: number;             // eff2-slg v1.0.0: positive-only boosts, capped at +15 (ranking only)
-  ranked: number;           // min(100, total + eff2) — used ONLY for ordering/display, never for floors or gates
+  courseEdge: number;       // courseedge v1.0.0: pattern boosts (compression/wedge/round), capped at +20 (ranking only)
+  ranked: number;           // min(100, total + eff2 + courseEdge) — used ONLY for ordering/display, never for floors or gates
+}
+
+/** courseedge v1.0.0 — positive-only pattern hits on the setup TF (display + ranking; never a gate) */
+export interface CourseEdgeHits {
+  compression?: { dir: "bull" | "bear"; curveMoveAtr: number; r2: number; bonus: number };
+  wedge?: { kind: "rising" | "falling"; breakDir: "bull" | "bear"; bonus: number };
+  doubleSweep?: { side: "buy" | "sell"; barsApart: number; routedVia: "trap" | "bucket"; bonus: number };
+  roundNumber?: { level: number; relDistPct: number; bonus: number };
+  totalBonus: number;       // min(20, compression + wedge + roundNumber); doubleSweep routes via the trap score when possible
 }
 
 export type InvalidCheckId = "reclaim" | "mitigation" | "oppositeStructure" | "htfFlip" | "dataStale";
@@ -398,6 +408,7 @@ export interface RadarCandidate {
   lastCheckedAt: number;
   archivedAt: number | null;      // set when moved to Recently Expired
   insightStance?: InsightStance | "none"; // captured at log time; also drives the card stamp
+  courseEdgeHits?: CourseEdgeHits; // courseedge v1.0.0: pattern hits behind the +courseEdge bucket (display only)
 }
 
 export interface SymbolScanState {
@@ -682,10 +693,19 @@ export interface SmokeReport {
 export interface RunnerSmokeReport {
   ranAt: number;
   window: string;              // "BTC+ETH+SOL · 15M · 30D (frozen)"
+  variantSlot: string;         // which variant was smoked (runner / courseedge / …)
   baseline: SmokeArm;
   variant: SmokeArm;
   /** FREQUENCY GUARD: exact equality — variant entry count must equal baseline */
   entriesEqual: boolean;
   overallPass: boolean;        // = entriesEqual (revert on any drift)
   dataSource: string;
+  /** courseedge v1.0.0: how the ranking boosts fired across engine-cadence setups (score-only variants) */
+  scoreImpact?: {
+    setups: number;            // validated setups sampled at the engine generation cadence
+    withBonus: number;         // setups that earned ≥ 1 course-edge point
+    avgBonus: number;          // mean totalBonus across ALL sampled setups
+    avgBonusWhenHit: number;   // mean totalBonus across setups that earned something
+    byPattern: { compression: number; wedge: number; doubleSweep: number; roundNumber: number }; // hit counts
+  };
 }

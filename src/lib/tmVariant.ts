@@ -8,7 +8,7 @@ import { loadLS } from "./utils";
  * base cost model. Only trade MANAGEMENT and (from v1.2.0) additive SOFT quality
  * layers differ. Soft layers never add hard vetoes.
  */
-export type TmVariantId = "baseline-v1.0.0" | "scalp10-tm-v1.1.0" | "scalp10-adv-v1.2.0";
+export type TmVariantId = "baseline-v1.0.0" | "scalp10-tm-v1.1.0" | "scalp10-adv-v1.2.0" | "scalp10-eff2-slg-v1.0.0";
 
 /**
  * FREQUENCY GUARD — quality improvements must not collapse trade frequency.
@@ -50,6 +50,10 @@ export interface TmVariantDef {
   mode: TmMode;
   /** adv v1.2.0 soft quality layers: pattern context, AMD tag, volume dry-up, wick-inclusive OB impulse, fakeout-reversal class, IST sessions */
   advQuality: boolean;
+  /** eff2-slg v1.0.0 Part A: positive-only ranking boosts, cap +15 — never a gate, never a penalty */
+  eff2: boolean;
+  /** eff2-slg v1.0.0 Part B: SL-Shield execution rules (confirmation trigger, maker-limit entry, stale exit) */
+  slShield: boolean;
   management: string;
   partial: { atR: number; closePct: number; thenSl: "breakeven" } | null;
   runner: string;

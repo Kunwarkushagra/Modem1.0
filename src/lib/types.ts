@@ -55,6 +55,8 @@ export interface LiquidityPool {
   kind: "equal_highs" | "equal_lows" | "swing_high" | "swing_low";
   touches: number;
   formedI: number;
+  /** eff2-slg: min(100, touches×25 + equal-cluster 20 + swept-within-8-bars 10) — ≥ 60 earns the pool-significance boost */
+  significance?: number;
 }
 
 export interface SweepEvent {
@@ -63,6 +65,9 @@ export interface SweepEvent {
   dryUp?: boolean;                            // avg volume of the 20 candles preceding the sweep < 0.7 × VolMA20
   fakeoutReversal?: boolean;                  // displacement close back through the level within 3 candles of the sweep
   amdPhase?: "Manipulation" | null;           // 20-bar range (≤ 2×ATR) whose extreme was swept
+  /** eff2-slg v1.0.0 ranking fields (soft layers) */
+  reclaimStrengthAtr?: number;                // sweep-candle close back inside the level, in ATR (≥ 0.2 → reclaim-strength boost)
+  reclaimFast?: boolean;                      // decisive reclaim (≥ 0.2×ATR inside) within 2 candles of the sweep → trap score +3
 }
 export interface SRLevel { price: number; touches: number; kind: "support" | "resistance"; strength: number }
 export interface PatternHit {
@@ -132,8 +137,8 @@ export interface SignalInfo {
 export interface Reasoning {
   htfBias: Bias;
   htfRationale: string;
-  liquidity: { grade: "A" | "B" | "C"; source: string; distanceAtr: number } | null;
-  sweep: { depthAtr: number; reclaim: boolean; displacementAtr: number; trapScore: number; dryUp?: boolean; fakeoutReversal?: boolean } | null;
+  liquidity: { grade: "A" | "B" | "C"; source: string; distanceAtr: number; significance?: number } | null;
+  sweep: { depthAtr: number; reclaim: boolean; displacementAtr: number; trapScore: number; dryUp?: boolean; fakeoutReversal?: boolean; reclaimStrengthAtr?: number; reclaimFast?: boolean } | null;
   structureEvent: { type: "BOS" | "CHoCH"; dir: "bull" | "bear"; ts: number; level: number } | null;
   zone: { kind: string; grade: "A" | "B"; distanceAtr: number } | null;
   session: { name: string; bonus: number };
@@ -238,8 +243,8 @@ export type TradeStatus = "pending" | "closed";
 export type TradeSource = "ai" | "manual" | "backtest" | "radar";
 
 /** Trade-management variant. Entry logic is identical for both — only exit management differs. */
-export type TmMode = "classic" | "tm110";
-export type ExitKind = "target" | "be" | "stop" | "time";
+export type TmMode = "classic" | "tm110" | "eff2slg";
+export type ExitKind = "target" | "be" | "stop" | "time" | "stale";
 
 /** Journal exit-reason tag — attached to every closed trade */
 export type ExitReason = "SL" | "TP1" | "TP2" | "BE" | "time-exit" | "invalidation" | "manual";
@@ -270,7 +275,9 @@ export interface RadarScoreBreakdown {
   session: number;          // /10 LDN/NY overlap 10 · London or NY 7 · Asia 3 · off 0
   falseBreakout: number;    // /10 breakout 10 · fakeout-reversal 10 · liquidity sweep 7 · neutral 6 (adv v1.2.0)
   amd: number;              // adv v1.2.0: +5 when AMD manipulation phase precedes the sweep
-  total: number;            // 0–100 (capped)
+  total: number;            // 0–100 (capped) — BASE score; radar floors filter on this (frequency-neutral)
+  eff2: number;             // eff2-slg v1.0.0: positive-only boosts, capped at +15 (ranking only)
+  ranked: number;           // min(100, total + eff2) — used ONLY for ordering/display, never for floors or gates
 }
 
 export type InvalidCheckId = "reclaim" | "mitigation" | "oppositeStructure" | "htfFlip" | "dataStale";
@@ -492,6 +499,11 @@ export interface BacktestResult {
   avgLossR: number;
   longs: number;
   shorts: number;
+  /** eff2-slg v1.0.0 SL-Shield counters (0 on baseline/tm110) */
+  missNoConfirm: number;     // entry skipped: no confirmation within 3 exec-TF candles
+  missLimitChase: number;    // maker limit cancelled: price ran ≥ 0.5R unfilled
+  missLimitUnfilled: number; // maker limit never filled inside the confirmation window
+  staleExits: number;        // stale-momentum exits (+0.5R not reached within 12 candles)
   durationMs: number;
   dataSource: string;
 }
@@ -568,3 +580,33 @@ export interface BenchReport {
 }
 
 export interface LogLine { t: number; msg: string; kind: "info" | "ok" | "warn" | "err" }
+
+/* ---------------- eff2-slg smoke test ---------------- */
+
+export interface SmokeArm {
+  variantId: string;
+  trades: number;
+  winRate: number;
+  slHitRate: number;        // % of closed trades fully stopped out
+  grossPerTrade: number;
+  costPerTrade: number;
+  netPerTrade: number;
+  profitFactor: number;
+  maxDrawdownR: number;
+  missNoConfirm: number;
+  missLimitChase: number;
+  missLimitUnfilled: number;
+  staleExits: number;
+}
+
+export interface SmokeReport {
+  ranAt: number;
+  window: string;           // "BTC+ETH+SOL · 15M · 30D"
+  baseline: SmokeArm;
+  variant: SmokeArm;
+  floor: number;            // max(0.8 × baseline, min(30, baseline)) — corrected guard
+  freqPass: boolean;
+  slPass: boolean;          // variant SL-hit rate ≤ baseline
+  overallPass: boolean;
+  dataSource: string;
+}

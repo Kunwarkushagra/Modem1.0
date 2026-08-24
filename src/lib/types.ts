@@ -425,7 +425,7 @@ export interface Settings {
   /* ---- AI Insight (opinion layer; server route reads GEMINI_API_KEY from env in production) ---- */
   aiInsightEnabled: boolean;
   geminiApiKey: string;         // static-build fallback only; stays in this browser, never logged
-  geminiModel: string;          // default gemini-2.0-flash
+  geminiModel: string;          // default gemini-3-flash-preview (404 → 2.5-flash → 2.5-flash-lite)
   /* ---- Universe hygiene guards (data-level, pre-scan; user-tunable, never auto-tuned) ----
      Exclusions = stablecoins ONLY by default (hard list + extras). The numeric guards are
      OPTIONAL toggles — DEFAULT OFF — retained so they can be re-enabled later. No warm-up gating. */

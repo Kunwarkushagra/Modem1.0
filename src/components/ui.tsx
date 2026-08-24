@@ -85,7 +85,7 @@ export function Btn(props: {
   );
 }
 
-export function Badge(props: { children: ReactNode; tone?: "gold" | "bull" | "bear" | "info" | "dim" | "warn"; className?: string }) {
+export function Badge(props: { children: ReactNode; tone?: "gold" | "bull" | "bear" | "info" | "dim" | "warn"; className?: string; title?: string }) {
   const t = props.tone ?? "dim";
   const map = {
     gold: "bg-gold-500/12 text-gold-300 border-gold-600/40",
@@ -95,7 +95,7 @@ export function Badge(props: { children: ReactNode; tone?: "gold" | "bull" | "be
     warn: "bg-gold-500/15 text-gold-300 border-gold-600/50",
     dim: "bg-ink-700/70 text-fog-300 border-ink-500",
   };
-  return <span className={cls("inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10.5px] font-mono font-medium tracking-wide", map[t], props.className)}>{props.children}</span>;
+  return <span title={props.title} className={cls("inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10.5px] font-mono font-medium tracking-wide", map[t], props.className)}>{props.children}</span>;
 }
 
 export function BiasPill(props: { bias: Bias; label: string }) {

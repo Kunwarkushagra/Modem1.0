@@ -21,13 +21,24 @@ export const TF_MINUTES: Record<Timeframe, number> = {
   "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440,
 };
 
+/** Tick precision per asset/price magnitude — single source of truth for display rounding. */
+export function tickDigits(n: number, asset?: AssetType): number {
+  const abs = Math.abs(n);
+  if (asset === "forex") return abs >= 100 ? 3 : 5;
+  if (asset === "crypto") return abs >= 1000 ? 2 : abs >= 1 ? 4 : abs >= 0.1 ? 5 : 6;
+  return abs >= 100 ? 2 : 3;
+}
+
+/** Round to symbol tick precision — never let a 17-digit float reach the UI or the AI payload. */
+export function roundTick(n: number, asset?: AssetType): number {
+  if (!isFinite(n)) return n;
+  const f = 10 ** tickDigits(n, asset);
+  return Math.round(n * f) / f;
+}
+
 export function fmtPrice(n: number, asset?: AssetType): string {
   if (!isFinite(n)) return "—";
-  const abs = Math.abs(n);
-  let digits = 2;
-  if (asset === "crypto") digits = abs >= 1000 ? 2 : abs >= 1 ? 3 : 5;
-  else if (asset === "forex") digits = abs >= 100 ? 3 : 5;
-  else digits = abs >= 100 ? 2 : 3;
+  const digits = tickDigits(n, asset);
   return n.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 

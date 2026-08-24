@@ -3,6 +3,7 @@ import type { AssetType, Bias, InsightState, RadarCandidate, RadarTf, RawUnivers
 import { radarBeep, revalidateCandidate, scanSymbol, scanUniverse } from "../lib/radar";
 import type { BatchProgress } from "../lib/radar";
 import { buildInsightPayload, requestInsight } from "../lib/aiInsight";
+import { COSTS } from "../lib/backtest";
 import { fetchLastPrice, fetchUniverseRaw } from "../lib/marketData";
 import { getTop30, putTop30, TOP30_TTL_MS } from "../lib/cache";
 import { applyUniverseGuards, parseExtraExcludes } from "../lib/universe";
@@ -79,10 +80,11 @@ function ScoreBars({ c }: { c: RadarCandidate }) {
 function RadarCard(props: {
   c: RadarCandidate; rank: number; now: number; settings: Settings;
   inTrade: boolean; archived?: boolean; mode: "quality" | "quantity";
+  lastPrice?: number | null;
   onOpenInTerminal: (h: { symbol: string; assetType: AssetType; timeframe: Timeframe }) => void;
   onLogged: () => void;
 }) {
-  const { c, rank, now, settings, inTrade, archived, mode } = props;
+  const { c, rank, now, settings, inTrade, archived, mode, lastPrice } = props;
   const toast = useToast();
   const s = c.setup;
   const long = s.direction === "Long";
@@ -97,6 +99,26 @@ function RadarCard(props: {
   const invalidated = c.status === "invalidated";
   const expired = c.status === "expired";
   const A = c.assetType;
+
+  // Trigger fired = live price reached the entry level. "IN TRADE" is reserved for
+  // after the user actually logs the trade (LOG / TAKE TRADE); until then we show
+  // "TRIGGERED — management phase" (display-only, never feeds the signal engine).
+  const triggered =
+    !inTrade && !archived && !invalidated && !expired &&
+    typeof lastPrice === "number" && isFinite(lastPrice) &&
+    (long ? lastPrice <= s.entry_price : lastPrice >= s.entry_price);
+
+  // Cost-in-R: read-only, computed from the frozen SCALP-1.0 cost model
+  // (0.02% maker entry + 0.10% taker exit + 0.05% slippage/leg, charged at planned TP1 exit).
+  const costInR = risk > 0 ? (s.entry_price * COSTS.entryPct + s.take_profit1 * COSTS.exitPct) / risk : 0;
+  const costTone = costInR <= 0.3 ? "bull" : costInR <= 0.5 ? "warn" : "bear";
+
+  // Format a possibly-numeric AI-restated invalidation back to tick precision.
+  const fmtRestated = (raw: string): string => {
+    const t = raw.trim();
+    if (/^-?[\d,]+(\.\d+)?$/.test(t)) return fmtPrice(Number(t.replace(/,/g, "")), A);
+    return raw;
+  };
 
   /* ---- AI Insight (additive opinion layer — never feeds back into the signal) ---- */
   const [insight, setInsight] = useState<InsightState>({ status: "idle" });
@@ -147,6 +169,17 @@ function RadarCard(props: {
             <span className="font-display text-[15px] font-extrabold tracking-tight text-fog-100">{c.symbol}</span>
             <Badge tone={long ? "bull" : "bear"}>{long ? "LONG" : "SHORT"}</Badge>
             <Badge tone="dim">{c.timeframe.toUpperCase()}</Badge>
+            <span
+              className={cls(
+                "rounded border px-1.5 py-0.5 font-mono text-[8.5px] font-bold tracking-wider",
+                costTone === "bull" && "border-bull-600/50 bg-bull-500/10 text-bull-300",
+                costTone === "warn" && "border-gold-600/50 bg-gold-500/10 text-gold-300",
+                costTone === "bear" && "border-bear-600/50 bg-bear-500/10 text-bear-300",
+              )}
+              title="Round-trip execution cost in R — 0.02% maker entry + 0.10% taker exit + 0.05% slippage per leg, from the frozen SCALP-1.0 cost model (read-only, computed at planned TP1). ≤0.30R green · ≤0.50R amber · >0.50R red."
+            >
+              COST {costInR.toFixed(2)}R
+            </span>
             <span className="font-mono text-[9px] text-fog-500">#{rank + 1}</span>
           </div>
           <div className="mt-0.5 font-mono text-[9.5px] tracking-wider text-fog-500">
@@ -159,7 +192,9 @@ function RadarCard(props: {
           ) : expired ? (
             <Badge tone="dim" className="px-2 py-1 text-[10px] font-bold">EXPIRED</Badge>
           ) : inTrade ? (
-            <Badge tone="info" className="px-2 py-1 text-[10px] font-bold">IN TRADE</Badge>
+            <Badge tone="info" className="px-2 py-1 text-[10px] font-bold" title="Logged to the journal — managed by trade rules (partial → BE → runner, 60-bar exit)">IN TRADE</Badge>
+          ) : triggered ? (
+            <Badge tone="gold" className="tv-blink px-2 py-1 text-[10px] font-bold" title="Entry level was reached by live price, but you have not logged it. Validity countdown still governs the entry window.">TRIGGERED — MANAGEMENT PHASE</Badge>
           ) : (
             <Badge tone="gold" className="px-2 py-1 text-[10px] font-bold">LIVE</Badge>
           )}
@@ -296,7 +331,7 @@ function RadarCard(props: {
                       ))}
                     </ul>
                   )}
-                  <p className="text-fog-400">INVALIDATION (RESTATED): <span className="text-fog-100">{r2.invalidationRestated}</span></p>
+                  <p className="text-fog-400">INVALIDATION (RESTATED): <span className="text-fog-100">{fmtRestated(r2.invalidationRestated)}</span></p>
                   <p className="border-t border-ink-600/50 pt-1.5 text-[9px] italic text-fog-500">{r2.disclaimer}</p>
                 </div>
               </div>
@@ -747,6 +782,7 @@ export function RadarView(props: {
         <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
           {top.map((c, i) => (
             <RadarCard key={c.key} c={c} rank={i} now={now} settings={settings} inTrade={inTradeFor(c)}
+              lastPrice={universe[c.symbol]?.lastPrice}
               mode={mode === "auto" ? (autoFallback ? "quantity" : "quality") : mode}
               onLogged={() => setPending(loadTrades().filter((tr) => tr.status === "pending"))}
               onOpenInTerminal={props.onOpenInTerminal} />

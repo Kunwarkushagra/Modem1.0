@@ -29,6 +29,9 @@ export const DEFAULT_SETTINGS: Settings = {
   radarUseTop30: true,
   radarSound: false,
   radarTmVariant: "scalp10-adv-v1.2.0",
+  aiInsightEnabled: true,
+  geminiApiKey: "",
+  geminiModel: "gemini-2.0-flash",
 };
 
 /** Validate + normalise the radar universe: uppercase, trim, dedupe, force USDT/USDC quote for crypto. */

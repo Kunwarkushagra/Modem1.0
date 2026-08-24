@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AssetType, Bias, RadarCandidate, RadarTf, ScanFunnel, Settings, SymbolScanState, Timeframe, Trade } from "../lib/types";
+import type { AssetType, Bias, InsightState, RadarCandidate, RadarTf, ScanFunnel, Settings, SymbolScanState, Timeframe, Trade } from "../lib/types";
 import { radarBeep, revalidateCandidate, scanSymbol, scanUniverse } from "../lib/radar";
 import type { BatchProgress } from "../lib/radar";
+import { buildInsightPayload, requestInsight } from "../lib/aiInsight";
 import { fetchLastPrice, fetchTop30Usdt } from "../lib/marketData";
 import { getTop30, putTop30, TOP30_TTL_MS } from "../lib/cache";
-import { loadTrades } from "../lib/journal";
+import { addTrade, loadTrades } from "../lib/journal";
 import { loadFrequencyGate, TM_VARIANTS, variantById } from "../lib/tmVariant";
 import { cls, fmtIST, fmtPrice, fmtTime, TF_MINUTES } from "../lib/utils";
-import { Badge, Btn, Card, ICheck, IRadar, IRefresh, IWarn, IX, Segmented, useToast } from "./ui";
+import { Badge, Btn, Card, IBrain, ICheck, IPlus, IRadar, IRefresh, IWarn, IX, Segmented, useToast } from "./ui";
 
 const blank = (symbol: string): SymbolScanState => ({ symbol, status: "idle", lastScanAt: 0, lastCloseEpoch: 0, lastPrice: null, error: null, candidatesFound: 0 });
 const ZERO_FUNNEL: ScanFunnel = { generated: 0, passedGates: 0, passedFloor: 0 };
@@ -75,10 +76,12 @@ function ScoreBars({ c }: { c: RadarCandidate }) {
 
 function RadarCard(props: {
   c: RadarCandidate; rank: number; now: number; settings: Settings;
-  inTrade: boolean; archived?: boolean;
+  inTrade: boolean; archived?: boolean; mode: "quality" | "quantity";
   onOpenInTerminal: (h: { symbol: string; assetType: AssetType; timeframe: Timeframe }) => void;
+  onLogged: () => void;
 }) {
-  const { c, rank, now, settings, inTrade, archived } = props;
+  const { c, rank, now, settings, inTrade, archived, mode } = props;
+  const toast = useToast();
   const s = c.setup;
   const long = s.direction === "Long";
   const sig = s.signal;
@@ -92,6 +95,38 @@ function RadarCard(props: {
   const invalidated = c.status === "invalidated";
   const expired = c.status === "expired";
   const A = c.assetType;
+
+  /* ---- AI Insight (additive opinion layer — never feeds back into the signal) ---- */
+  const [insight, setInsight] = useState<InsightState>({ status: "idle" });
+  const insightBusy = insight.status === "loading";
+  const insightOff = !settings.aiInsightEnabled;
+  const insightBlocked = invalidated || expired || !!archived || insightOff;
+
+  const fetchInsight = async () => {
+    if (insightBusy || insightBlocked) return; // debounced by state; global max-1 concurrency in the module
+    setInsight({ status: "loading" });
+    const payload = buildInsightPayload(c, mode);
+    const { promise } = requestInsight(payload, { localKey: settings.geminiApiKey, model: settings.geminiModel });
+    const out = await promise;
+    if ("unavailable" in out) setInsight({ status: "unavailable", message: out.unavailable });
+    else setInsight({ status: "done", result: out });
+  };
+
+  const logPaper = () => {
+    if (inTrade || invalidated || expired || archived) return;
+    addTrade({
+      symbol: c.symbol, assetType: c.assetType, timeframe: c.timeframe,
+      direction: s.direction, entry: s.entry_price, stopLoss: s.stop_loss, tp1: s.take_profit1, tp2: s.take_profit2,
+      rr: s.risk_reward_ratio, confidence: c.score.total, confluences: s.confluences,
+      rationale: s.trade_rationale, status: "pending", outcome: null, exitPrice: null, pnlPct: null, pnlR: null,
+      closedAt: null, notes: `radar ${mode} mode · score ${c.score.total}`, source: "radar",
+      signalType: s.signal?.type, signalGeneratedAt: s.signal?.generatedAt,
+      signalDisplayIST: s.signal?.displayTimeIST, signalValidTill: s.signal?.validTillTs,
+      insightStance: insight.status === "done" ? insight.result.stance : "none",
+    });
+    props.onLogged();
+    toast.push("ok", `${s.direction} ${c.symbol} logged to journal (paper) · insight stance: ${insight.status === "done" ? insight.result.stance : "none"}`);
+  };
 
   return (
     <article className={cls(
@@ -213,8 +248,67 @@ function RadarCard(props: {
         <summary className="cursor-pointer select-none font-mono text-[9.5px] tracking-widest text-fog-400 hover:text-fog-200">SCORE BREAKDOWN</summary>
         <div className="py-1.5"><ScoreBars c={c} /></div>
       </details>
-      <div className="mt-auto flex items-center justify-between border-t border-ink-600/70 px-3.5 py-2">
-        <span className="font-mono text-[9px] text-fog-500">DISPLAY ONLY — NO AUTO-TRADE, NO SIZE ADVICE</span>
+
+      {/* AI INSIGHT result */}
+      {insight.status !== "idle" && (
+        <div className="tv-pop border-t border-ink-600/70 px-3.5 py-2">
+          {insight.status === "loading" && (
+            <div className="tv-scanbar flex items-center gap-2 rounded-md border border-ink-600 bg-ink-900/50 px-3 py-2 font-mono text-[10px] tracking-widest text-gold-300">
+              <IBrain size={13} className="tv-blink" /> REVIEWING SIGNAL — STRUCTURED PAYLOAD ONLY…
+            </div>
+          )}
+          {insight.status === "unavailable" && (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-bear-600/40 bg-bear-500/8 px-3 py-2">
+              <span className="font-mono text-[10px] font-bold tracking-widest text-bear-300">{insight.message}</span>
+              <Btn size="xs" variant="ghost" onClick={() => setInsight({ status: "idle" })}><IX size={10} /></Btn>
+            </div>
+          )}
+          {insight.status === "done" && (() => {
+            const r2 = insight.result;
+            const tone = r2.stance === "AGREE" ? "bull" : r2.stance === "DISAGREE" ? "bear" : "dim";
+            return (
+              <div className={cls("rounded-md border bg-ink-900/55", r2.stance === "AGREE" ? "border-bull-600/50" : r2.stance === "DISAGREE" ? "border-bear-600/50" : "border-ink-500")}>
+                <div className="flex flex-wrap items-center gap-2 border-b border-ink-600/60 px-3 py-1.5">
+                  <IBrain size={13} className="text-fog-400" />
+                  <span className="font-mono text-[9.5px] font-bold tracking-[0.18em] text-fog-400">AI INSIGHT</span>
+                  <Badge tone={tone} className="text-[10px] font-bold">{r2.stance}</Badge>
+                  <span className="font-mono text-[9.5px] text-fog-500">CONF {r2.confidence}/100</span>
+                  <div className="h-1 w-16 overflow-hidden rounded-full bg-ink-700">
+                    <div className={cls("h-full rounded-full", r2.stance === "AGREE" ? "bg-bull-500" : r2.stance === "DISAGREE" ? "bg-bear-500" : "bg-ink-400")} style={{ width: `${r2.confidence}%` }} />
+                  </div>
+                  {r2.cached && <Badge tone="info" className="text-[8.5px]">CACHED</Badge>}
+                  <span className="ml-auto font-mono text-[8.5px] tracking-wider text-fog-500">{fmtIST(r2.generatedAt)} · {r2.source.toUpperCase()}</span>
+                </div>
+                <div className="space-y-1.5 px-3 py-2 font-mono text-[10px] leading-relaxed">
+                  <p className="whitespace-pre-line text-fog-200">{r2.summary}</p>
+                  {r2.keyRisks.length > 0 && (
+                    <ul className="space-y-0.5">
+                      {r2.keyRisks.map((k, i) => (
+                        <li key={i} className="flex items-start gap-1.5 text-warn-400 text-gold-300/90"><IWarn size={10} className="mt-0.5 shrink-0" /><span>{k}</span></li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="text-fog-400">INVALIDATION (RESTATED): <span className="text-fog-100">{r2.invalidationRestated}</span></p>
+                  <p className="border-t border-ink-600/50 pt-1.5 text-[9px] italic text-fog-500">{r2.disclaimer}</p>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      <div className="mt-auto flex flex-wrap items-center gap-1.5 border-t border-ink-600/70 px-3.5 py-2">
+        <span className="mr-auto font-mono text-[9px] text-fog-500">DISPLAY ONLY — NO AUTO-TRADE, NO SIZE ADVICE</span>
+        <Btn size="xs" variant={insightOff ? "ghost" : "outline"} disabled={insightBlocked || insightBusy}
+          title={insightOff ? "Enable AI Insight in Settings" : expired || invalidated ? "Signal no longer valid — insight disabled" : "Independent opinion on this exact signal (structured payload only)"}
+          onClick={() => void fetchInsight()}>
+          <IBrain size={11} /> {insightOff ? "AI OFF" : insightBusy ? "REVIEWING…" : "GET AI INSIGHT"}
+        </Btn>
+        <Btn size="xs" variant="ghost" disabled={inTrade || invalidated || expired || !!archived}
+          title="Log this signal to the paper journal with the current insight stance"
+          onClick={logPaper}>
+          <IPlus size={11} /> LOG
+        </Btn>
         <Btn size="xs" variant="ghost" onClick={() => props.onOpenInTerminal({ symbol: c.symbol, assetType: c.assetType, timeframe: c.timeframe })}>
           <IRadar size={11} /> TERMINAL
         </Btn>
@@ -591,7 +685,10 @@ export function RadarView(props: {
       {top.length > 0 ? (
         <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
           {top.map((c, i) => (
-            <RadarCard key={c.key} c={c} rank={i} now={now} settings={settings} inTrade={inTradeFor(c)} onOpenInTerminal={props.onOpenInTerminal} />
+            <RadarCard key={c.key} c={c} rank={i} now={now} settings={settings} inTrade={inTradeFor(c)}
+              mode={mode === "auto" ? (autoFallback ? "quantity" : "quality") : mode}
+              onLogged={() => setPending(loadTrades().filter((tr) => tr.status === "pending"))}
+              onOpenInTerminal={props.onOpenInTerminal} />
           ))}
         </div>
       ) : (

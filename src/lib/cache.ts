@@ -125,3 +125,45 @@ export async function clearTop30(): Promise<void> {
     });
   } catch { /* non-fatal */ }
 }
+
+/* ---------------- AI Insight cache (6h TTL, keyed by signalId) ---------------- */
+
+export const INSIGHT_TTL_MS = 6 * 3600_000;
+export interface CachedInsight { result: unknown; ts: number }
+const memInsight = new Map<string, CachedInsight>();
+
+export async function putInsight(signalId: string, result: unknown): Promise<void> {
+  const value: CachedInsight = { result, ts: Date.now() };
+  memInsight.set(signalId, value);
+  const db = await openDb();
+  if (!db) return;
+  try {
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(value, `insight:${signalId}`);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    });
+  } catch { /* non-fatal */ }
+}
+
+/** Fresh cached insight (< 6h) or null. */
+export async function getInsight(signalId: string): Promise<CachedInsight | null> {
+  const fresh = (v: CachedInsight) => (Date.now() - v.ts < INSIGHT_TTL_MS ? v : null);
+  const memHit = memInsight.get(signalId);
+  if (memHit) { const f = fresh(memHit); if (f) return f; }
+  const db = await openDb();
+  if (!db) return null;
+  try {
+    const val = await new Promise<CachedInsight | null>((resolve) => {
+      const tx = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).get(`insight:${signalId}`);
+      req.onsuccess = () => resolve((req.result as CachedInsight) ?? null);
+      req.onerror = () => resolve(null);
+    });
+    return val ? fresh(val) : null;
+  } catch {
+    return null;
+  }
+}

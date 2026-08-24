@@ -232,6 +232,37 @@ export async function fetchLastPrice(rawSymbol: string, asset: AssetType, tf: Ti
   }
 }
 
+/**
+ * Top liquid USDT pairs by 24h quote volume (Binance /api/v3/ticker/24hr).
+ * Excludes stable/stable-adjacent quotes and leveraged tokens. Used to build the
+ * radar's dynamic 30-symbol universe (cached in IndexedDB, refreshed every 6h).
+ */
+const EXCLUDED_QUOTES = ["USDC", "FDUSD", "TUSD", "BUSD", "DAI", "EUR", "GBP", "TRY", "BRL", "ARS"];
+const LEVERAGED_RE = /(UP|DOWN|BULL|BEAR)$/;
+
+export async function fetchTop30Usdt(limit = 30): Promise<string[]> {
+  let err: unknown = null;
+  for (const base of BINANCE_BASES) {
+    try {
+      const res = await fetchWithTimeout(`${base}/api/v3/ticker/24hr`, 9000);
+      if (!res.ok) throw new Error(`ticker ${res.status}`);
+      const data = (await res.json()) as Array<{ symbol: string; quoteVolume: string; lastPrice: string }>;
+      const ranked = data
+        .filter((t) => t.symbol.endsWith("USDT"))
+        .filter((t) => Number(t.lastPrice) > 0 && Number(t.quoteVolume) > 0)
+        .map((t) => ({ symbol: t.symbol, base: t.symbol.slice(0, -4), qv: Number(t.quoteVolume) }))
+        .filter((t) => !EXCLUDED_QUOTES.includes(t.base))
+        .filter((t) => !LEVERAGED_RE.test(t.base))
+        .sort((a, b) => b.qv - a.qv)
+        .slice(0, limit)
+        .map((t) => t.symbol);
+      if (ranked.length >= 10) return ranked;
+      throw new Error("ticker too short");
+    } catch (e) { err = e; }
+  }
+  throw err instanceof Error ? err : new Error("top30 unreachable");
+}
+
 export interface TickerQuote { symbol: string; label: string; price: number; changePct: number; asset: AssetType }
 
 export async function fetchTickerBatch(): Promise<TickerQuote[]> {

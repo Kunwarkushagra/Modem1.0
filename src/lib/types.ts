@@ -246,7 +246,7 @@ export type ExitReason = "SL" | "TP1" | "TP2" | "BE" | "time-exit" | "invalidati
 
 /* ---------------- Top Setups Radar (display layer only — engine untouched) ---------------- */
 
-export type RadarTf = "5m" | "15m" | "1h";
+export type RadarTf = "5m" | "15m" | "1h" | "4h";
 
 export interface RadarScoreBreakdown {
   htfBias: number;          // /20 aligned 20 · ranging 8 · against 0
@@ -352,11 +352,14 @@ export interface Settings {
   telegramChatId: string;
   autoRefresh: boolean;
   /* ---- Top Setups Radar (display layer) ---- */
-  radarSymbols: string[];
+  radarSymbols: string[];       // user additions / custom watchlist
   radarTimeframe: RadarTf;
-  radarQualityFloor: number;   // 0–100, default 55
+  radarMode: "auto" | "quality" | "quantity"; // display mode — never touches generation
+  radarQualityFloor: number;    // QUALITY mode + scan floor, 0–100, default 65
+  quantityFloor: number;        // QUANTITY mode floor, 0–100, default 50
+  radarUseTop30: boolean;       // merge Binance top-30 USDT by 24h quote volume (6h cache)
   radarSound: boolean;
-  radarTmVariant: TmVariantId; // which management variant the radar cards describe
+  radarTmVariant: TmVariantId;  // which management variant the radar cards describe
 }
 
 export interface BacktestTrade {

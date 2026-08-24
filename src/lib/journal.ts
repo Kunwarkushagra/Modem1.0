@@ -23,7 +23,10 @@ export const DEFAULT_SETTINGS: Settings = {
   autoRefresh: true,
   radarSymbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "LINKUSDT", "XRPUSDT"],
   radarTimeframe: "15m",
-  radarQualityFloor: 55,
+  radarMode: "auto",
+  radarQualityFloor: 65,
+  quantityFloor: 50,
+  radarUseTop30: true,
   radarSound: false,
   radarTmVariant: "scalp10-adv-v1.2.0",
 };

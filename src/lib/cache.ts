@@ -67,3 +67,61 @@ export async function getCandles(key: string): Promise<CachedCandles | null> {
     return memHit ?? null;
   }
 }
+
+/* ---- universe cache: Binance top-30 USDT pairs by 24h quote volume (6h TTL) ---- */
+
+export interface CachedTop30 { items: string[]; ts: number }
+export const TOP30_TTL_MS = 6 * 3600_000;
+const TOP30_KEY = "meta:top30usdt";
+const memTop30 = new Map<string, CachedTop30>();
+
+export async function putTop30(items: string[]): Promise<void> {
+  const value: CachedTop30 = { items, ts: Date.now() };
+  memTop30.set(TOP30_KEY, value);
+  const db = await openDb();
+  if (!db) return;
+  try {
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(value, TOP30_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    });
+  } catch { /* non-fatal */ }
+}
+
+export async function getTop30(): Promise<CachedTop30 | null> {
+  const memHit = memTop30.get(TOP30_KEY) ?? null;
+  const db = await openDb();
+  if (!db) return memHit;
+  try {
+    const val = await new Promise<CachedTop30 | null>((resolve) => {
+      const tx = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).get(TOP30_KEY);
+      req.onsuccess = () => {
+        const r = req.result as CachedTop30 | undefined;
+        resolve(r && Array.isArray(r.items) ? r : null);
+      };
+      req.onerror = () => resolve(null);
+    });
+    return val ?? memHit;
+  } catch {
+    return memHit;
+  }
+}
+
+export async function clearTop30(): Promise<void> {
+  memTop30.delete(TOP30_KEY);
+  const db = await openDb();
+  if (!db) return;
+  try {
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).delete(TOP30_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    });
+  } catch { /* non-fatal */ }
+}

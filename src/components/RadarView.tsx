@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AssetType, Bias, RadarCandidate, RadarTf, ScanFunnel, Settings, SymbolScanState, Timeframe, Trade } from "../lib/types";
-import { radarBeep, revalidateCandidate, scanSymbol } from "../lib/radar";
-import { fetchLastPrice } from "../lib/marketData";
+import { radarBeep, revalidateCandidate, scanSymbol, scanUniverse } from "../lib/radar";
+import type { BatchProgress } from "../lib/radar";
+import { fetchLastPrice, fetchTop30Usdt } from "../lib/marketData";
+import { getTop30, putTop30, TOP30_TTL_MS } from "../lib/cache";
 import { loadTrades } from "../lib/journal";
 import { loadFrequencyGate, TM_VARIANTS, variantById } from "../lib/tmVariant";
 import { cls, fmtIST, fmtPrice, fmtTime, TF_MINUTES } from "../lib/utils";
@@ -9,7 +11,6 @@ import { Badge, Btn, Card, ICheck, IRadar, IRefresh, IWarn, IX, Segmented, useTo
 
 const blank = (symbol: string): SymbolScanState => ({ symbol, status: "idle", lastScanAt: 0, lastCloseEpoch: 0, lastPrice: null, error: null, candidatesFound: 0 });
 const ZERO_FUNNEL: ScanFunnel = { generated: 0, passedGates: 0, passedFloor: 0 };
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /* ---------------- tiny pieces ---------------- */
 
@@ -231,12 +232,39 @@ export function RadarView(props: {
 }) {
   const { settings } = props;
   const toast = useToast();
-  const symbols = settings.radarSymbols;
   const tf = settings.radarTimeframe;
-  const floor = settings.radarQualityFloor;
+  // SCAN floor = the lower of the two display floors so both modes have candidates to filter.
+  // Display filtering (QUALITY/QUANTITY/AUTO) happens AFTER scanning — generation is untouched.
+  const scanFloor = Math.min(settings.radarQualityFloor, settings.quantityFloor);
   const stepMs = TF_MINUTES[tf] * 60000;
 
-  const [universe, setUniverse] = useState<Record<string, SymbolScanState>>(() => Object.fromEntries(symbols.map((s) => [s, blank(s)])));
+  /* dynamic universe: Binance top-30 USDT by 24h quote volume (6h IndexedDB cache) ∪ user watchlist, max 30 */
+  const [top30, setTop30] = useState<string[]>([]);
+  const [top30Age, setTop30Age] = useState<number | null>(null);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      if (!settings.radarUseTop30) { setTop30([]); setTop30Age(null); return; }
+      const cached = await getTop30();
+      if (cached && live) { setTop30(cached.items); setTop30Age(cached.ts); }
+      if (cached && Date.now() - cached.ts < TOP30_TTL_MS) return;
+      try {
+        const items = await fetchTop30Usdt();
+        await putTop30(items);
+        if (live) { setTop30(items); setTop30Age(Date.now()); }
+      } catch (e) {
+        console.error("[radar] top-30 universe fetch failed —", e);
+      }
+    })();
+    return () => { live = false; };
+  }, [settings.radarUseTop30]);
+
+  const symbols = useMemo(() => {
+    const merged = settings.radarUseTop30 ? [...top30, ...settings.radarSymbols] : [...settings.radarSymbols];
+    return [...new Set(merged)].slice(0, 30);
+  }, [top30, settings.radarSymbols, settings.radarUseTop30]);
+
+  const [universe, setUniverse] = useState<Record<string, SymbolScanState>>({});
   const [candidates, setCandidates] = useState<RadarCandidate[]>([]);
   const [pending, setPending] = useState<Trade[]>([]);
   const [now, setNow] = useState(() => Date.now());
@@ -279,73 +307,71 @@ export function RadarView(props: {
     return [...kept, ...replaced, ...fresh].slice(-80);
   }, []);
 
-  /* one symbol scan — shared by the loop and SCAN NOW; never throws, always surfaces state */
-  const scanOne = useCallback(async (sym: string, tfNow: RadarTf, floorNow: number): Promise<boolean> => {
-    setUniverse((u) => ({ ...u, [sym]: { ...(u[sym] ?? blank(sym)), status: "scanning" } }));
-    try {
-      // FREQUENCY GUARD: adv v1.2.0 soft layers are reverted (run without them) when the last
-      // conclusive benchmark failed max(0.8 × baseline, 50) full-run trades in any window.
-      const gate = loadFrequencyGate();
-      const advActive = variantById(settings.radarTmVariant).advQuality && gate.ok !== false;
-      const res = await scanSymbol(sym, tfNow, floorNow, advActive);
-      htfRef.current[sym] = res.htfBias;
-      setUniverse((u) => ({ ...u, [sym]: res.state }));
-      setFunnels((f) => ({ ...f, [sym]: res.funnel }));
-      setCandidates((prev) => mergeCandidates(prev, sym, res.candidates));
-      return true;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "scan failed";
-      console.error(`[radar] ${sym} ${tfNow}: scan threw —`, e);
-      setUniverse((u) => ({ ...u, [sym]: { ...(u[sym] ?? blank(sym)), status: "stale", error: msg } }));
-      return false;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mergeCandidates, settings.radarTmVariant]);
+  const [progress, setProgress] = useState<BatchProgress | null>(null);
+
+  /* shared batch plumbing — FREQUENCY GUARD: adv v1.2.0 soft layers are reverted (run without them)
+     when the last conclusive benchmark failed max(0.8 × baseline, 50) full-run trades in any window. */
+  const advActive = variantById(settings.radarTmVariant).advQuality && loadFrequencyGate().ok !== false;
+  const onScanResult = useCallback((res: ReturnType<typeof scanSymbol> extends Promise<infer R> ? R : never) => {
+    htfRef.current[res.state.symbol] = res.htfBias;
+    setUniverse((u) => ({ ...u, [res.state.symbol]: res.state }));
+    setFunnels((f) => ({ ...f, [res.state.symbol]: res.funnel }));
+    setCandidates((prev) => mergeCandidates(prev, res.state.symbol, res.candidates));
+  }, [mergeCandidates]);
+  const onScanFail = useCallback((sym: string, msg: string) => {
+    setUniverse((u) => ({ ...u, [sym]: { ...(u[sym] ?? blank(sym)), status: "stale", error: msg } }));
+  }, []);
+
+  const batchScan = useCallback(async (list: string[], manual: boolean) => {
+    if (scanningRef.current || !list.length) return { ok: 0, failed: 0 };
+    scanningRef.current = true;
+    if (manual) setManualScanning(true);
+    setProgress({ done: 0, total: list.length, current: list[0] });
+    const res = await scanUniverse(
+      list, tf, scanFloor, advActive,
+      onScanResult,
+      (p) => setProgress(p),
+      onScanFail,
+      () => false,
+      4, // concurrency limit — 30 symbols never block the UI
+    );
+    setLastFullScanAt(Date.now());
+    scanningRef.current = false;
+    if (manual) setManualScanning(false);
+    window.setTimeout(() => setProgress(null), 1100);
+    return res;
+  }, [tf, scanFloor, advActive, onScanResult, onScanFail]);
 
   /* SCAN NOW — full immediate pass on confirmed candles (no waiting for the next close) */
   const scanNow = useCallback(async () => {
-    if (scanningRef.current) return;
-    scanningRef.current = true;
-    setManualScanning(true);
-    let ok = 0;
-    for (const sym of symbols) {
-      if (await scanOne(sym, tf, floor)) ok++;
-      await sleep(120);
-    }
-    setLastFullScanAt(Date.now());
-    scanningRef.current = false;
-    setManualScanning(false);
+    const { ok, failed } = await batchScan(symbols, true);
     const activeN = candidatesRef.current.filter((c) => c.status === "active").length;
-    toast.push("ok", `Manual scan complete · ${ok}/${symbols.length} symbols OK · ${activeN} active candidate${activeN === 1 ? "" : "s"}`);
-  }, [symbols, tf, floor, scanOne, toast]);
+    toast.push("ok", `Scan complete · ${ok}/${symbols.length} symbols OK${failed ? ` · ${failed} failed` : ""} · ${activeN} active candidate${activeN === 1 ? "" : "s"}`);
+  }, [symbols, batchScan, toast]);
 
-  /* scanner loop — immediate pass on mount, then re-scan each symbol when a new setup-TF confirmed close lands */
+  /* scanner loop — immediate batched pass on mount, then batched re-scan of symbols whose
+     setup-TF confirmed close just landed (epoch check, never more than one batch at a time) */
   useEffect(() => {
     let cancelled = false;
     firstRender.current = true;
-    setUniverse(Object.fromEntries(symbols.map((s) => [s, universeRef.current[s] ?? blank(s)])) as Record<string, SymbolScanState>);
+    setUniverse((u) => Object.fromEntries(symbols.map((s) => [s, u[s] ?? blank(s)])) as Record<string, SymbolScanState>);
+    if (!symbols.length) return () => { cancelled = true; };
 
-    (async () => {
-      for (const sym of symbols) {
-        if (cancelled) return;
-        await scanOne(sym, tf, floor);
-        await sleep(160);
-      }
-      if (!cancelled) setLastFullScanAt(Date.now());
-    })();
+    void batchScan(symbols, false);
 
     const t = setInterval(() => {
+      if (cancelled || scanningRef.current) return;
       const epoch = Math.floor(Date.now() / stepMs) * stepMs;
-      for (const sym of symbols) {
+      const stale = symbols.filter((sym) => {
         const st = universeRef.current[sym];
-        if (!st || st.status === "scanning") continue;
-        if (epoch > st.lastCloseEpoch) void scanOne(sym, tf, floor);
-      }
+        return st && st.status !== "scanning" && epoch > st.lastCloseEpoch;
+      });
+      if (stale.length) void batchScan(stale, false);
     }, 3000);
 
     return () => { cancelled = true; clearInterval(t); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbols.join("|"), tf, floor, scanOne]);
+  }, [symbols.join("|"), tf, scanFloor, advActive]);
 
   /* lightweight re-validation every 5s: price vs INVALID-IF checklist + journal sync */
   useEffect(() => {
@@ -369,9 +395,18 @@ export function RadarView(props: {
 
   useEffect(() => { setPending(loadTrades().filter((tr) => tr.status === "pending")); }, []);
 
-  /* Top-5 / TOP SETUP change notifications */
+  /* ---- display modes (pure view filtering — the candidate store and scoring are untouched) ----
+     QUALITY  : score ≥ qualityFloor (default 65), max 5 cards
+     QUANTITY : score ≥ quantityFloor (default 50), max 8 cards
+     AUTO     : QUALITY if it yields ≥1 card, else QUANTITY + fallback banner (never mixed) */
   const active = useMemo(() => candidates.filter((c) => c.status === "active").sort((a, b) => b.score.total - a.score.total), [candidates]);
-  const top = useMemo(() => active.slice(0, 6), [active]);
+  const qualityList = useMemo(() => active.filter((c) => c.score.total >= settings.radarQualityFloor).slice(0, 5), [active, settings.radarQualityFloor]);
+  const quantityList = useMemo(() => active.filter((c) => c.score.total >= settings.quantityFloor).slice(0, 8), [active, settings.quantityFloor]);
+  const mode = settings.radarMode;
+  const autoFallback = mode === "auto" && qualityList.length === 0;
+  const top = mode === "quality" ? qualityList : mode === "quantity" ? quantityList : qualityList.length ? qualityList : quantityList;
+
+  /* TOP SETUP change notifications (keyed on the visible board) */
   useEffect(() => {
     const keys = top.map((c) => c.key);
     const prev = prevTopRef.current;
@@ -385,7 +420,7 @@ export function RadarView(props: {
       toast.push("ok", `TOP SETUP → ${topNow.symbol} ${topNow.setup.direction} @ ${fmtPrice(topNow.setup.entry_price, "crypto")} · score ${topNow.score.total}`);
       if (settings.radarSound) radarBeep(true);
     } else if (newcomer) {
-      toast.push("info", `Radar: ${newcomer.symbol} ${newcomer.setup.direction} entered Top 5 · score ${newcomer.score.total}`);
+      toast.push("info", `Radar: ${newcomer.symbol} ${newcomer.setup.direction} entered the board · score ${newcomer.score.total}`);
       if (settings.radarSound) radarBeep(false);
     }
   }, [top, toast, settings.radarSound]);
@@ -428,8 +463,14 @@ export function RadarView(props: {
             <div className="font-mono text-[8.5px] tracking-[0.26em] text-fog-500">DISPLAY LAYER · SHARED LIVE ENGINE</div>
           </div>
         </div>
-        <Segmented size="sm" options={[{ v: "5m" as RadarTf, label: "5M" }, { v: "15m" as RadarTf, label: "15M" }, { v: "1h" as RadarTf, label: "1H" }]}
+        <Segmented size="sm" options={[{ v: "5m" as RadarTf, label: "5M" }, { v: "15m" as RadarTf, label: "15M" }, { v: "1h" as RadarTf, label: "1H" }, { v: "4h" as RadarTf, label: "4H" }]}
           value={tf} onChange={(v) => props.onSettingsChange({ radarTimeframe: v })} />
+        <div className="flex items-center gap-1">
+          <span className="font-mono text-[9px] tracking-widest text-fog-500">MODE</span>
+          <Segmented size="sm"
+            options={[{ v: "auto" as const, label: "AUTO" }, { v: "quality" as const, label: "QUALITY" }, { v: "quantity" as const, label: "QUANTITY" }]}
+            value={settings.radarMode} onChange={(v) => props.onSettingsChange({ radarMode: v })} />
+        </div>
         <div className="flex items-center gap-1">
           <span className="font-mono text-[9px] tracking-widest text-fog-500">TM</span>
           {TM_VARIANTS.map((v) => (
@@ -460,21 +501,35 @@ export function RadarView(props: {
           {manualScanning ? <span className="tv-blink">SCANNING…</span> : <><IRefresh size={13} /> SCAN NOW</>}
         </Btn>
         <div className="ml-auto flex items-center gap-3 font-mono text-[10px] tracking-wider text-fog-400">
-          <Badge tone="dim">FLOOR {floor} · SETTINGS</Badge>
+          <span title="Set both floors in Settings → Radar"><Badge tone="dim">Q ≥{settings.radarQualityFloor} · N ≥{settings.quantityFloor}</Badge></span>
           <span className="text-fog-500">{lastFullScanAt ? `LAST SCAN ${fmtIST(lastFullScanAt)}` : "NEVER SCANNED"}</span>
           <span className={cls(anyScanning && "tv-blink text-gold-300")}>{anyScanning ? "SCANNING…" : `NEXT CLOSE IN ${Math.floor(nextScanS / 60)}:${String(nextScanS % 60).padStart(2, "0")}`}</span>
         </div>
       </div>
 
+      {/* batch progress */}
+      {progress && (
+        <div className="tv-panel px-4 py-2">
+          <div className="flex items-center justify-between font-mono text-[10px] tracking-widest text-fog-400">
+            <span className="tv-blink text-gold-300">SCANNING {progress.done}/{progress.total}{progress.current ? ` · ${progress.current}` : ""} · 4-WAY BATCH</span>
+            <span>{Math.round((progress.done / Math.max(1, progress.total)) * 100)}%</span>
+          </div>
+          <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-ink-600">
+            <div className="h-full rounded-full bg-gold-500 transition-all duration-300" style={{ width: `${(progress.done / Math.max(1, progress.total)) * 100}%` }} />
+          </div>
+        </div>
+      )}
+
       {/* visible status line */}
       <div className="tv-panel flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 font-mono text-[10.5px] tracking-wider">
         <span className="flex items-center gap-1.5 text-fog-300">
           <span className={cls("tv-live-dot inline-block h-1.5 w-1.5 rounded-full", anyScanning ? "bg-gold-400" : "bg-bull-500")} />
-          SCANNING {symbols.length} SYMBOLS
+          SCANNING {symbols.length} SYMBOLS{settings.radarUseTop30 ? " · TOP-30 USDT ∪ WATCHLIST" : ""}
         </span>
-        <span className="text-fog-400">TF {tf.toUpperCase()}</span>
-        <span className="text-fog-400">FLOOR {floor}</span>
+        <span className="text-fog-400">TF {tf.toUpperCase()}{tf === "4h" ? " · HTF 1D · EXEC 1H" : ""}</span>
+        <span className="text-fog-400">MODE {mode.toUpperCase()}{autoFallback ? "→QUANTITY" : ""}</span>
         <span className={cls("font-bold", activeCount > 0 ? "text-gold-300" : "text-fog-500")}>CANDIDATES FOUND: {activeCount}</span>
+        <span className={cls("font-bold", top.length > 0 ? "text-bull-400" : "text-fog-500")}>SHOWING: {top.length}{mode === "quality" || (mode === "auto" && !autoFallback) ? "/5" : "/8"}</span>
         <span className="ml-auto text-fog-500">CONFIRMED-CANDLES ONLY · SHARED LIVE ENGINE</span>
       </div>
 
@@ -508,7 +563,7 @@ export function RadarView(props: {
           <span className="text-fog-500">→</span>
           <span className="text-fog-400">PASSED GATES V1–V6 <b className="text-info-400">{agg.passedGates}</b></span>
           <span className="text-fog-500">→</span>
-          <span className="text-fog-400">PASSED FLOOR {floor} <b className="text-gold-300">{agg.passedFloor}</b></span>
+          <span className="text-fog-400">PASSED SCAN FLOOR {scanFloor} <b className="text-gold-300">{agg.passedFloor}</b></span>
           <span className="mx-1 hidden h-4 w-px bg-ink-500 sm:block" />
           <span className="text-fog-400">EXPIRED <b className="text-fog-200">{agg.expired}</b></span>
           <span className="text-fog-400">INVALIDATED <b className="text-bear-400">{agg.invalidated}</b></span>
@@ -516,6 +571,21 @@ export function RadarView(props: {
           <span className="ml-auto text-fog-500">per-symbol detail in browser console · [radar] prefix</span>
         </div>
       </details>
+
+      {/* AUTO fallback banner */}
+      {autoFallback && quantityList.length > 0 && (
+        <div className="tv-panel tv-rise flex items-center gap-2.5 border-l-2 border-l-gold-500 px-4 py-2.5 font-mono text-[11px] tracking-wider text-gold-300">
+          <IWarn size={14} />
+          <span><b>QUALITY MODE: no setups — showing QUANTITY mode</b></span>
+          <span className="text-fog-400">· {quantityList.length} candidate{quantityList.length === 1 ? "" : "s"} ≥ {settings.quantityFloor} · quality floor is {settings.radarQualityFloor}</span>
+        </div>
+      )}
+      {mode === "quality" && qualityList.length === 0 && quantityList.length > 0 && (
+        <div className="tv-panel flex items-center gap-2.5 border-l-2 border-l-info-500 px-4 py-2.5 font-mono text-[11px] tracking-wider text-info-400">
+          <IWarn size={14} />
+          <span>QUALITY floor ({settings.radarQualityFloor}) not met — {quantityList.length} candidate{quantityList.length === 1 ? "" : "s"} sit between {settings.quantityFloor} and {settings.radarQualityFloor}. Switch to QUANTITY or AUTO to see them.</span>
+        </div>
+      )}
 
       {/* top candidates */}
       {top.length > 0 ? (
@@ -530,7 +600,7 @@ export function RadarView(props: {
           <IRadar size={34} className={cls("text-fog-500", anyScanning && "tv-blink text-gold-500")} />
           <p className="font-display text-lg font-extrabold tracking-tight text-fog-200">NO LIVE SETUPS — MARKET QUIET</p>
           <p className="max-w-lg text-sm leading-relaxed text-fog-400">
-            Zero candidates cleared the existing gates <span className="text-fog-200">and</span> the quality floor ({floor}) on the last scan pass.
+            Zero candidates cleared the existing gates <span className="text-fog-200">and</span> the {mode === "quantity" ? "quantity" : "quality"} floor ({mode === "quantity" ? settings.quantityFloor : settings.radarQualityFloor}) on the last scan pass.
             The radar re-runs the full confirmed-candle pipeline for all {symbols.length} symbols on each {tf.toUpperCase()} close — standing aside is the default state, not a fault.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-2 font-mono text-[10px] tracking-widest text-fog-500">

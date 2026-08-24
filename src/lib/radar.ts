@@ -177,6 +177,53 @@ export async function scanSymbol(symbolRaw: string, tf: RadarTf, qualityFloor: n
   };
 }
 
+/* ------------------------------------------------ batched universe scan */
+
+export interface BatchProgress { done: number; total: number; current: string }
+
+/**
+ * Scan a whole watchlist with bounded concurrency (default 4 at a time) so a
+ * 30-symbol pass never freezes the UI. Per-symbol failures are isolated: the
+ * batch keeps going and reports them via onFail.
+ */
+export async function scanUniverse(
+  symbols: string[],
+  tf: RadarTf,
+  qualityFloor: number,
+  advQuality: boolean,
+  onResult: (res: ScanOutcome) => void,
+  onProgress: (p: BatchProgress) => void,
+  onFail: (symbol: string, msg: string) => void,
+  isCancelled: () => boolean,
+  concurrency = 4,
+): Promise<{ ok: number; failed: number }> {
+  let idx = 0, ok = 0, failed = 0, done = 0;
+  const worker = async () => {
+    for (;;) {
+      if (isCancelled()) return;
+      const my = idx++;
+      if (my >= symbols.length) return;
+      const sym = symbols[my];
+      onProgress({ done, total: symbols.length, current: sym });
+      try {
+        const res = await scanSymbol(sym, tf, qualityFloor, advQuality);
+        ok++;
+        onResult(res);
+      } catch (e) {
+        failed++;
+        const msg = e instanceof Error ? e.message : "scan failed";
+        console.error(`[radar] ${sym} ${tf}: batch scan threw —`, e);
+        onFail(sym, msg);
+      }
+      done++;
+      onProgress({ done, total: symbols.length, current: sym });
+    }
+  };
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, symbols.length)) }, () => worker());
+  await Promise.all(workers);
+  return { ok, failed };
+}
+
 /* ------------------------------------------------ INVALID-IF checklist */
 
 export function buildInvalidChecks(

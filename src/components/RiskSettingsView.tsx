@@ -247,6 +247,37 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
                 }} className={inp} />
             </label>
           </div>
+
+          <div className="mt-4 border-t border-ink-600/60 pt-3">
+            <div className="mb-2 flex items-center gap-2">
+              <span className="font-mono text-[10px] font-bold tracking-[0.18em] text-fog-300">UNIVERSE HYGIENE GUARDS v2</span>
+              <Badge tone="info" className="text-[8px]">DATA-LEVEL · DISPLAY ONLY</Badge>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className={lbl}>EXTRA EXCLUDED BASES (comma-separated, on top of stablecoins)</span>
+                <input defaultValue={s.universeExcludedBases.join(", ")}
+                  onBlur={(e) => {
+                    const list = e.target.value.split(",").map((x) => x.trim().toUpperCase()).filter(Boolean);
+                    e.target.value = list.join(", ");
+                    save({ universeExcludedBases: list }, list.length ? `Excluded ${list.length} extra base(s)` : "Extra exclusions cleared");
+                  }} className={inp} placeholder="e.g. SHIB, PEPE" />
+              </label>
+              <label className="block">
+                <span className={lbl}>MIN 24H QUOTE VOLUME (USDT)</span>
+                <input type="number" min={0} step={1_000_000} defaultValue={s.universeMinQuoteVolume}
+                  onBlur={(e) => {
+                    const v = Math.max(0, Number(e.target.value) || 50_000_000);
+                    e.target.value = String(v);
+                    save({ universeMinQuoteVolume: v }, `Min quote volume: ${v >= 1e6 ? (v / 1e6).toFixed(0) + "M" : v}`);
+                  }} className={inp} />
+              </label>
+            </div>
+            <p className="mt-2 text-[10px] leading-relaxed text-fog-500">
+              Applied to the top-30 universe <span className="text-fog-300">before scanning</span>: stablecoins/fiat pegs excluded (hard list + your extras), 24h range ≥ 1.5%, quoteVolume &gt; min, |24h change| ≤ 25%. New listings need <span className="text-fog-300">2 consecutive 6h refreshes</span> before they're scannable (shown as “NEW — WARMING UP”). RESYNC is manual and never auto-tunes these floors. Strategy, validators, and backtest are untouched.
+            </p>
+          </div>
+
           <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
             <button type="button" onClick={() => save({ radarUseTop30: !s.radarUseTop30 }, `Top-30 universe ${!s.radarUseTop30 ? "on" : "off"}`)}
               className={cls("tv-btn flex items-center justify-between rounded-md border px-3 py-2 font-mono text-[10.5px] font-bold tracking-widest",

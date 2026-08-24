@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AssetType, Bias, InsightState, RadarCandidate, RadarTf, ScanFunnel, Settings, SymbolScanState, Timeframe, Trade } from "../lib/types";
+import type { AssetType, Bias, InsightState, RadarCandidate, RadarTf, RawUniverseEntry, ScanFunnel, Settings, SymbolScanState, Timeframe, Trade } from "../lib/types";
 import { radarBeep, revalidateCandidate, scanSymbol, scanUniverse } from "../lib/radar";
 import type { BatchProgress } from "../lib/radar";
 import { buildInsightPayload, requestInsight } from "../lib/aiInsight";
-import { fetchLastPrice, fetchTop30Usdt } from "../lib/marketData";
-import { advanceStreaks, getTop30, MIN_SCANNABLE_STREAK, putTop30, TOP30_TTL_MS } from "../lib/cache";
+import { fetchLastPrice, fetchUniverseRaw } from "../lib/marketData";
+import { advanceStreaks, getStreaks, getTop30, MIN_SCANNABLE_STREAK, putTop30, TOP30_TTL_MS } from "../lib/cache";
+import { applyUniverseGuards, parseExtraExcludes } from "../lib/universe";
+import type { ExcludedEntry, UniverseCfg } from "../lib/universe";
 import { addTrade, loadTrades } from "../lib/journal";
 import { loadFrequencyGate, TM_VARIANTS, variantById } from "../lib/tmVariant";
 import { cls, fmtIST, fmtPrice, fmtTime, TF_MINUTES } from "../lib/utils";
@@ -332,42 +334,70 @@ export function RadarView(props: {
   const scanFloor = Math.min(settings.radarQualityFloor, settings.quantityFloor);
   const stepMs = TF_MINUTES[tf] * 60000;
 
-  /* dynamic universe: Binance top-30 USDT by 24h quote volume (6h IndexedDB cache) ∪ user watchlist, max 30.
-     Universe Hygiene Guards v2 filter the list BEFORE scanning: stablecoins, volatility floor,
-     min quote volume, price-change cap (in fetchTop30Usdt) + min list age (streaks, here). */
-  const [top30, setTop30] = useState<string[]>([]);
-  const [warming, setWarming] = useState<string[]>([]); // symbols in top-30 but streak < MIN_SCANNABLE_STREAK
+  /* dynamic universe: Binance top-30 USDT by 24h quote volume — RAW stats cached 6h in IndexedDB
+     (so every guard stays re-applicable after reload). Universe Hygiene Guards v2 (lib/universe.ts)
+     filter the list BEFORE scanning:
+       1. stablecoin bases (hard list ∪ configured)   2. 24h range ≥ volatility floor
+       3. quoteVolume > min                           4. |24h change| ≤ cap
+       5. two consecutive 6h refreshes (streaks) → "NEW — WARMING UP" until then
+     Floors are user-tunable in Settings and NEVER auto-tuned; RESYNC stays manual. */
+  const [scannableTop30, setScannableTop30] = useState<string[]>([]);
+  const [warming, setWarming] = useState<string[]>([]);      // streak < MIN_SCANNABLE_STREAK
+  const [excluded, setExcluded] = useState<ExcludedEntry[]>([]);
   const [top30Age, setTop30Age] = useState<number | null>(null);
-  const guardCfg = useMemo(
-    () => ({ excludedBases: settings.universeExcludedBases, minQuoteVolume: settings.universeMinQuoteVolume }),
-    [settings.universeExcludedBases, settings.universeMinQuoteVolume],
-  );
+  const [resyncNonce, setResyncNonce] = useState(0);
+  const guardCfg = useMemo<UniverseCfg>(() => ({
+    extraExcludes: parseExtraExcludes(settings.universeExtraExcludes),
+    minQuoteVolume: settings.universeMinQuoteVolume,
+    volFloorPct: settings.universeVolFloorPct,
+    changeCapPct: settings.universeChangeCapPct,
+  }), [settings.universeExtraExcludes, settings.universeMinQuoteVolume, settings.universeVolFloorPct, settings.universeChangeCapPct]);
+
+  /* Settings "RESYNC NOW" clears the cache and fires this; the pass re-runs immediately */
+  useEffect(() => {
+    const onResync = () => setResyncNonce((n) => n + 1);
+    window.addEventListener("tv-universe-resync", onResync);
+    return () => window.removeEventListener("tv-universe-resync", onResync);
+  }, []);
+
   useEffect(() => {
     let live = true;
     (async () => {
-      if (!settings.radarUseTop30) { setTop30([]); setWarming([]); setTop30Age(null); return; }
+      if (!settings.radarUseTop30) { setScannableTop30([]); setWarming([]); setExcluded([]); setTop30Age(null); return; }
+      let entries: RawUniverseEntry[] | null = null;
+      let ts: number | null = null;
+      let streaks: Record<string, number> = {};
       const cached = await getTop30();
-      if (cached && live) { setTop30(cached.items); setWarming(cached.warming ?? []); setTop30Age(cached.ts); }
-      if (cached && Date.now() - cached.ts < TOP30_TTL_MS) return;
-      try {
-        const items = await fetchTop30Usdt(guardCfg);
-        const streaks = await advanceStreaks(items);
-        const warmingNow = items.filter((s) => (streaks[s] ?? 0) < MIN_SCANNABLE_STREAK);
-        await putTop30(items, warmingNow);
-        if (live) { setTop30(items); setWarming(warmingNow); setTop30Age(Date.now()); }
-      } catch (e) {
-        console.error("[radar] top-30 universe fetch failed —", e);
+      if (cached) { entries = cached.entries; ts = cached.ts; }
+      if (!entries || !ts || Date.now() - ts > TOP30_TTL_MS) {
+        try {
+          entries = await fetchUniverseRaw();
+          ts = Date.now();
+          streaks = await advanceStreaks(entries.map((e) => e.symbol));
+          await putTop30(entries);
+          console.info(`[universe] refresh ok · ${entries.length} raw rows · streaks advanced`);
+        } catch (e) {
+          console.error("[radar] universe refresh failed — falling back to last cache —", e);
+          streaks = await getStreaks();
+        }
+      } else {
+        streaks = await getStreaks();
       }
+      if (!live || !entries || !ts) return;
+      const roster: Record<string, { consecutive: number; firstSeenAt: number; lastSeenAt: number }> = {};
+      for (const [sym, n] of Object.entries(streaks)) roster[sym] = { consecutive: n, firstSeenAt: ts, lastSeenAt: ts };
+      const view = applyUniverseGuards(entries, guardCfg, roster);
+      setScannableTop30(view.scannable);
+      setWarming(view.warming.map((w) => w.symbol));
+      setExcluded(view.excluded);
+      setTop30Age(ts);
+      console.info(`[universe] guards → ${view.scannable.length} scannable · ${view.warming.length} warming · ${view.excluded.length} cut${view.excluded.length ? ` (${view.excluded.map((x) => x.symbol + ":" + x.tag).join(", ")})` : ""}`);
     })();
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.radarUseTop30]);
+  }, [settings.radarUseTop30, guardCfg, resyncNonce]);
 
-  /* symbols actually scanned: scannable top-30 (streak >= 2) ∪ user watchlist, capped at 30 */
-  const scannableTop30 = useMemo(
-    () => top30.filter((s) => !warming.includes(s)),
-    [top30, warming],
-  );
+  /* symbols actually scanned: guard-passed top-30 ∪ user watchlist (exempt from guards), capped at 30 */
   const symbols = useMemo(() => {
     const merged = settings.radarUseTop30 ? [...scannableTop30, ...settings.radarSymbols] : [...settings.radarSymbols];
     return [...new Set(merged)].slice(0, 30);
@@ -643,8 +673,9 @@ export function RadarView(props: {
         <span className="text-fog-400">TF {tf.toUpperCase()}{tf === "4h" ? " · HTF 1D · EXEC 1H" : ""}</span>
         <span className="text-fog-400">MODE {mode.toUpperCase()}{autoFallback ? "→QUANTITY" : ""}</span>
         {settings.radarUseTop30 && (
-          <span className="text-fog-500" title="Universe Hygiene Guards v2: stablecoins excluded, 24h range ≥1.5%, quoteVolume > min, |change| ≤25%, min 2 refreshes">
-            HYGIENE ✓{warming.length > 0 ? <span className="text-info-400"> · {warming.length} WARMING</span> : ""}
+          <span className="text-fog-500" title={`Universe Hygiene Guards v2 — stablecoins (hard + configured) excluded · 24h range ≥ ${settings.universeVolFloorPct}% · quoteVolume > ${(settings.universeMinQuoteVolume / 1e6).toFixed(0)}M · |change| ≤ ${settings.universeChangeCapPct}% · min ${MIN_SCANNABLE_STREAK} consecutive refreshes${top30Age ? `\nlist fetched ${fmtIST(top30Age)}` : ""}${excluded.length ? `\n\nCUT BY GUARDS:\n${excluded.map((x) => `${x.symbol} [${x.tag}] — ${x.reason}`).join("\n")}` : ""}`}>
+            HYGIENE ✓{warming.length > 0 && <span className="text-info-400"> · {warming.length} WARM</span>}
+            {excluded.length > 0 && <span className="text-bear-400"> · {excluded.length} CUT</span>}
           </span>
         )}
         <span className={cls("font-bold", activeCount > 0 ? "text-gold-300" : "text-fog-500")}>CANDIDATES FOUND: {activeCount}</span>

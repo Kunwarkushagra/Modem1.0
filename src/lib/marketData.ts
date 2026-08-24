@@ -1,4 +1,4 @@
-import type { AssetType, Candle, Timeframe } from "./types";
+import type { AssetType, Candle, RawUniverseEntry, Timeframe } from "./types";
 import { fetchWithTimeout, hashStr, mulberry32, normSymbol, okxInstId, stooqSymbol, TF_MINUTES, withRetries, yahooSymbol } from "./utils";
 
 export interface FetchResult { candles: Candle[]; source: string; simulated: boolean }

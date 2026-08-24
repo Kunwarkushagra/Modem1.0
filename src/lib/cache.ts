@@ -1,4 +1,4 @@
-import type { Candle } from "./types";
+import type { Candle, RawUniverseEntry } from "./types";
 
 /**
  * Tiny IndexedDB candle cache (store: "candles", key: `${symbol}:${tf}:${epochBucket}`).
@@ -68,15 +68,17 @@ export async function getCandles(key: string): Promise<CachedCandles | null> {
   }
 }
 
-/* ---- universe cache: Binance top-30 USDT pairs by 24h quote volume (6h TTL) ---- */
+/* ---- universe cache: raw top-30 USDT rows by 24h quote volume (6h TTL) ----
+   Raw stats are cached (not the filtered list) so every Hygiene Guard stays
+   re-applicable from cache after a reload or a user floor change. */
 
-export interface CachedTop30 { items: string[]; warming?: string[]; ts: number }
+export interface CachedTop30 { entries: RawUniverseEntry[]; ts: number }
 export const TOP30_TTL_MS = 6 * 3600_000;
-const TOP30_KEY = "meta:top30usdt";
+const TOP30_KEY = "meta:top30usdt-v2";
 const memTop30 = new Map<string, CachedTop30>();
 
-export async function putTop30(items: string[], warming: string[] = []): Promise<void> {
-  const value: CachedTop30 = { items, warming, ts: Date.now() };
+export async function putTop30(entries: RawUniverseEntry[]): Promise<void> {
+  const value: CachedTop30 = { entries, ts: Date.now() };
   memTop30.set(TOP30_KEY, value);
   const db = await openDb();
   if (!db) return;
@@ -154,7 +156,7 @@ export async function getTop30(): Promise<CachedTop30 | null> {
       const req = tx.objectStore(STORE).get(TOP30_KEY);
       req.onsuccess = () => {
         const r = req.result as CachedTop30 | undefined;
-        resolve(r && Array.isArray(r.items) ? r : null);
+        resolve(r && Array.isArray(r.entries) ? r : null);
       };
       req.onerror = () => resolve(null);
     });

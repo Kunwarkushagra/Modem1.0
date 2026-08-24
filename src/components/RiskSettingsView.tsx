@@ -255,21 +255,39 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="block">
-                <span className={lbl}>EXTRA EXCLUDED BASES (comma-separated, on top of stablecoins)</span>
-                <input defaultValue={s.universeExcludedBases.join(", ")}
+                <span className={lbl}>EXTRA EXCLUDED BASES (comma-separated · stables USDC…USDTB always cut)</span>
+                <input defaultValue={s.universeExtraExcludes}
                   onBlur={(e) => {
-                    const list = e.target.value.split(",").map((x) => x.trim().toUpperCase()).filter(Boolean);
-                    e.target.value = list.join(", ");
-                    save({ universeExcludedBases: list }, list.length ? `Excluded ${list.length} extra base(s)` : "Extra exclusions cleared");
+                    const v = e.target.value.toUpperCase();
+                    e.target.value = v;
+                    save({ universeExtraExcludes: v }, v.trim() ? "Extra exclusions saved" : "Extra exclusions cleared");
                   }} className={inp} placeholder="e.g. SHIB, PEPE" />
               </label>
               <label className="block">
-                <span className={lbl}>MIN 24H QUOTE VOLUME (USDT)</span>
+                <span className={lbl}>MIN 24H QUOTE VOLUME (USDT · default 50M)</span>
                 <input type="number" min={0} step={1_000_000} defaultValue={s.universeMinQuoteVolume}
                   onBlur={(e) => {
                     const v = Math.max(0, Number(e.target.value) || 50_000_000);
                     e.target.value = String(v);
                     save({ universeMinQuoteVolume: v }, `Min quote volume: ${v >= 1e6 ? (v / 1e6).toFixed(0) + "M" : v}`);
+                  }} className={inp} />
+              </label>
+              <label className="block">
+                <span className={lbl}>24H RANGE FLOOR (% · default 1.5)</span>
+                <input type="number" min={0} step={0.1} defaultValue={s.universeVolFloorPct}
+                  onBlur={(e) => {
+                    const v = Math.max(0, Number(e.target.value) || 1.5);
+                    e.target.value = String(v);
+                    save({ universeVolFloorPct: v }, `Volatility floor: ${v}%`);
+                  }} className={inp} />
+              </label>
+              <label className="block">
+                <span className={lbl}>|24H CHANGE| CAP (% · default 25)</span>
+                <input type="number" min={1} step={1} defaultValue={s.universeChangeCapPct}
+                  onBlur={(e) => {
+                    const v = Math.max(1, Number(e.target.value) || 25);
+                    e.target.value = String(v);
+                    save({ universeChangeCapPct: v }, `Change cap: ±${v}%`);
                   }} className={inp} />
               </label>
             </div>
@@ -284,7 +302,12 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
                 s.radarUseTop30 ? "border-bull-600 bg-bull-500/12 text-bull-400" : "border-ink-600 text-fog-400")}>
               <span>TOP-30 USDT UNIVERSE</span><span>{s.radarUseTop30 ? "ON" : "OFF"}</span>
             </button>
-            <button type="button" onClick={() => { void clearTop30().then(() => toast.push("info", "Top-30 cache cleared — refetches on next radar open/scan")); }}
+            <button type="button" onClick={() => {
+              void clearTop30().then(() => {
+                window.dispatchEvent(new Event("tv-universe-resync"));
+                toast.push("info", "Universe cache cleared — refetching now (manual resync; floors untouched)");
+              });
+            }}
               className="tv-btn flex items-center justify-between rounded-md border border-ink-600 px-3 py-2 font-mono text-[10.5px] font-bold tracking-widest text-fog-400 hover:border-gold-600 hover:text-gold-300">
               <span>RESYNC TOP-30 NOW</span><span>↻</span>
             </button>

@@ -266,6 +266,27 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
           <p className="mt-3 text-[11px] leading-relaxed text-fog-400">
             Universe = Binance <span className="text-fog-200">top-30 USDT pairs by 24h quote volume</span> (cached 6h, refreshed automatically) merged with your custom list above, deduped, capped at 30. The radar re-runs the <span className="text-fog-200">same live engine</span> (confirmed candles only) for every symbol on each setup-TF close, batched 4-way so the UI never freezes. Modes are display-only — QUALITY shows up to 5 cards ≥ quality floor, QUANTITY up to 8 ≥ quantity floor, AUTO falls back with a banner. No auto-trade, no position sizing; generation, journal and backtests are never touched by mode filtering.
           </p>
+
+          <div className="mt-4 border-t border-ink-600/60 pt-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="font-mono text-[10px] font-bold tracking-[0.18em] text-fog-300">AI INSIGHT · OPINION LAYER</span>
+              <button type="button" onClick={() => save({ aiInsightEnabled: !s.aiInsightEnabled }, `AI Insight ${!s.aiInsightEnabled ? "enabled" : "disabled"}`)}
+                className={cls("tv-btn relative h-5 w-9 rounded-full transition-colors", s.aiInsightEnabled ? "bg-bull-600" : "bg-ink-500")}>
+                <span className={cls("absolute top-0.5 h-4 w-4 rounded-full bg-ink-950 transition-all", s.aiInsightEnabled ? "left-[18px]" : "left-0.5")} />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="block"><span className={lbl}>GEMINI API KEY (static-build fallback)</span>
+                <input type="password" value={s.geminiApiKey} onChange={(e) => setS({ ...s, geminiApiKey: e.target.value })} onBlur={() => save(null, s.geminiApiKey ? "Gemini key saved locally" : undefined)} className={inp} placeholder="AIza…" />
+              </label>
+              <label className="block"><span className={lbl}>MODEL</span>
+                <input value={s.geminiModel} onChange={(e) => setS({ ...s, geminiModel: e.target.value })} onBlur={() => save(null)} className={inp} placeholder="gemini-2.0-flash" />
+              </label>
+            </div>
+            <p className="mt-2 text-[10.5px] leading-relaxed text-fog-500">
+              Production: deploy <span className="font-mono text-fog-300">server/api-ai-insight.ts</span> as <span className="font-mono text-fog-300">/api/ai-insight</span> — it reads <span className="font-mono text-fog-300">GEMINI_API_KEY</span> from env, whitelists the payload fields, and the key never reaches the browser (cards pick the route up automatically). In this static build the key above stays in your browser and goes straight to Gemini. Insights are cached 6h per signal, one call at a time, and are <span className="text-fog-300">opinion only</span> — they never touch gates, scoring, validity, or the backtest.
+            </p>
+          </div>
         </Card>
 
         <Card icon={<IGear size={15} />} title="Data & Storage">

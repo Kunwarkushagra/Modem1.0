@@ -235,7 +235,7 @@ export interface AnalyzeParams {
 
 export type TradeOutcome = "win" | "loss" | "breakeven";
 export type TradeStatus = "pending" | "closed";
-export type TradeSource = "ai" | "manual" | "backtest";
+export type TradeSource = "ai" | "manual" | "backtest" | "radar";
 
 /** Trade-management variant. Entry logic is identical for both — only exit management differs. */
 export type TmMode = "classic" | "tm110";
@@ -262,6 +262,52 @@ export interface RadarScoreBreakdown {
 
 export type InvalidCheckId = "reclaim" | "mitigation" | "oppositeStructure" | "htfFlip" | "dataStale";
 
+/* ---------------- AI Insight (additive opinion layer — never part of signal generation) ---------------- */
+
+export type InsightStance = "AGREE" | "DISAGREE" | "NEUTRAL";
+
+/** Exact fields accepted by /api/ai-insight — structured signal payload only, no raw candles */
+export interface AiInsightPayload {
+  signalId: string;
+  symbol: string;
+  timeframe: string;
+  direction: "Long" | "Short";
+  score: number;
+  scoreBreakdown: RadarScoreBreakdown;
+  confluences: string[];
+  entry: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  invalidationLevel: number;
+  costInR: number;                 // round-trip fees+slippage expressed in R (≈, from the shared cost model)
+  session: string;
+  liquidityGrade: "A" | "B" | "C" | null;
+  falseBreakoutClass: string;      // confirmed-breakout | fakeout-reversal | liquidity-sweep | neutral
+  htfBias: Bias;
+  validityWindow: { type: SignalType; candles: number; generatedAtIST: string; validTillIST: string };
+  reasoningText: string;
+  mode: "quality" | "quantity";
+}
+
+export interface AiInsightResult {
+  stance: InsightStance;
+  confidence: number;              // 0–100, clamped
+  summary: string;                 // ≤ 3 lines, enforced
+  keyRisks: string[];              // ≤ 3 bullets, enforced
+  invalidationRestated: string;
+  disclaimer: string;              // fixed constant, enforced client-side
+  generatedAt: number;
+  cached: boolean;
+  source: "server" | "local" | "cache";
+}
+
+export type InsightState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "done"; result: AiInsightResult }
+  | { status: "unavailable"; message: string };
+
 export interface InvalidCheck { id: InvalidCheckId; label: string; hit: boolean; detail: string }
 
 export type RadarStatus = "active" | "invalidated" | "expired";
@@ -280,6 +326,7 @@ export interface RadarCandidate {
   dataStale: boolean;
   lastCheckedAt: number;
   archivedAt: number | null;      // set when moved to Recently Expired
+  insightStance?: InsightStance | "none"; // captured at log time; also drives the card stamp
 }
 
 export interface SymbolScanState {
@@ -328,6 +375,8 @@ export interface Trade {
   signalValidTill?: number;
   /** why the trade ended — tagged on every closed trade */
   exitReason?: ExitReason | null;
+  /** AI Insight stance at log time — to measure insight accuracy later */
+  insightStance?: InsightStance | "none";
 }
 
 export interface AlertRule {
@@ -360,6 +409,10 @@ export interface Settings {
   radarUseTop30: boolean;       // merge Binance top-30 USDT by 24h quote volume (6h cache)
   radarSound: boolean;
   radarTmVariant: TmVariantId;  // which management variant the radar cards describe
+  /* ---- AI Insight (opinion layer; server route reads GEMINI_API_KEY from env in production) ---- */
+  aiInsightEnabled: boolean;
+  geminiApiKey: string;         // static-build fallback only; stays in this browser, never logged
+  geminiModel: string;          // default gemini-2.0-flash
 }
 
 export interface BacktestTrade {

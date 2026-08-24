@@ -80,6 +80,11 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
     return t.outcome === "win" ? <Badge tone="bull">WIN</Badge> : t.outcome === "loss" ? <Badge tone="bear">LOSS</Badge> : <Badge tone="dim">BE</Badge>;
   };
 
+  const stanceBadge = (st: Trade["insightStance"]) => {
+    if (!st || st === "none") return <span className="text-fog-500">—</span>;
+    return <Badge tone={st === "AGREE" ? "bull" : st === "DISAGREE" ? "bear" : "dim"}>{st}</Badge>;
+  };
+
   const inp = "w-full rounded-md border border-ink-500 bg-ink-900 px-2.5 py-1.5 font-mono text-xs text-fog-100 outline-none focus:border-gold-600/70";
 
   return (
@@ -93,6 +98,35 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
         <Stat label="Sharpe (trade)" value={perf.total ? perf.sharpe.toFixed(2) : "—"} sub={`max DD ${perf.total ? perf.maxDrawdown.toFixed(1) : "0"}%`} />
         <Stat label="Closed Trades" value={String(perf.total)} sub="fuel for self-learning" />
       </div>
+
+      {/* AI INSIGHT ACCURACY — measured from the stance stored with each logged trade */}
+      {(() => {
+        const closed = props.trades.filter((t) => t.status === "closed");
+        const buckets: Array<{ k: NonNullable<Trade["insightStance"]>; label: string }> = [
+          { k: "AGREE", label: "AI AGREED" }, { k: "DISAGREE", label: "AI DISAGREED" },
+          { k: "NEUTRAL", label: "AI NEUTRAL" }, { k: "none", label: "NO INSIGHT" },
+        ];
+        const rows = buckets.map((b) => {
+          const g = closed.filter((t) => (t.insightStance ?? "none") === b.k);
+          const w = g.filter((t) => t.outcome === "win").length;
+          return { ...b, n: g.length, wr: g.length ? (w / g.length) * 100 : 0 };
+        }).filter((r) => r.n > 0);
+        if (!rows.length) return null;
+        return (
+          <div className="tv-panel tv-rise flex flex-wrap items-center gap-x-5 gap-y-1.5 px-4 py-2.5">
+            <span className="font-mono text-[9.5px] font-bold tracking-[0.18em] text-fog-400">AI INSIGHT ACCURACY</span>
+            {rows.map((r) => (
+              <span key={r.k} className="flex items-center gap-1.5 font-mono text-[10.5px]">
+                {stanceBadge(r.k === "none" ? "none" : r.k)}
+                <span className="text-fog-500">{r.label}</span>
+                <b className={r.wr >= 50 ? "text-bull-400" : "text-bear-400"}>{r.wr.toFixed(0)}%</b>
+                <span className="text-fog-500">({r.n})</span>
+              </span>
+            ))}
+            <span className="ml-auto font-mono text-[9px] tracking-wider text-fog-500">STANCE CAPTURED AT LOG TIME · WINS ÷ CLOSED (BE EXCLUDED)</span>
+          </div>
+        );
+      })()}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <Card className="xl:col-span-2" icon={<IBook size={15} />} title="Equity Curve (compounded, 100 base)"
@@ -158,13 +192,14 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
                 <th className="px-2 py-2 font-medium">CONFLUENCES</th>
                 <th className="px-2 py-2 font-medium">RESULT</th>
                 <th className="px-2 py-2 font-medium">EXIT</th>
+                <th className="px-2 py-2 font-medium">INSIGHT</th>
                 <th className="px-2 py-2 font-medium">PNL</th>
                 <th className="px-2 py-2" />
               </tr>
             </thead>
             <tbody>
               {filtered.length === 0 && (
-                <tr><td colSpan={12} className="px-4 py-10 text-center text-fog-500">No trades match. Take a validated setup from the terminal or log one manually.</td></tr>
+                <tr><td colSpan={13} className="px-4 py-10 text-center text-fog-500">No trades match. Take a validated setup from the terminal or log one manually.</td></tr>
               )}
               {filtered.map((t) => (
                 <tr key={t.id} className="border-b border-ink-600/40 transition-colors hover:bg-ink-750/60">
@@ -190,6 +225,7 @@ export function JournalView(props: { trades: Trade[]; onChanged: () => void }) {
                   <td className="px-2 py-2">{t.status === "closed" && t.exitReason
                     ? <Badge tone={t.exitReason === "invalidation" ? "bear" : t.exitReason === "SL" ? "bear" : t.exitReason === "manual" ? "dim" : "info"}>{t.exitReason}</Badge>
                     : <span className="text-fog-500">—</span>}</td>
+                  <td className="px-2 py-2">{stanceBadge(t.insightStance)}</td>
                   <td className="px-2 py-2"><PctCell v={t.pnlPct} />{t.pnlR != null && t.status === "closed" && <span className="ml-1 text-[9px] text-fog-500">{t.pnlR > 0 ? "+" : ""}{t.pnlR}R</span>}</td>
                   <td className="px-2 py-2">
                     <div className="flex gap-1">

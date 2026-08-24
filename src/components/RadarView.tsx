@@ -260,9 +260,15 @@ function RadarCard(props: {
             </div>
           )}
           {insight.status === "unavailable" && (
-            <div className="flex items-center justify-between gap-2 rounded-md border border-bear-600/40 bg-bear-500/8 px-3 py-2">
-              <span className="font-mono text-[10px] font-bold tracking-widest text-bear-300">{insight.message}</span>
-              <Btn size="xs" variant="ghost" onClick={() => setInsight({ status: "idle" })}><IX size={10} /></Btn>
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-bear-600/40 bg-bear-500/8 px-3 py-2"
+              title="Exact failure detail — retry is always available; the card stays fully usable">
+              <span className="min-w-0 break-words font-mono text-[10px] font-bold tracking-widest text-bear-300">
+                AI CALL FAILED · {insight.message}
+              </span>
+              <span className="flex shrink-0 items-center gap-1.5">
+                <Btn size="xs" variant="ghost" onClick={() => void fetchInsight()}><IRefresh size={10} /> RETRY</Btn>
+                <Btn size="xs" variant="ghost" onClick={() => setInsight({ status: "idle" })}><IX size={10} /></Btn>
+              </span>
             </div>
           )}
           {insight.status === "done" && (() => {

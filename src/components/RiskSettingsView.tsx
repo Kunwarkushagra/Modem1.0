@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { Settings, Trade } from "../lib/types";
 import { computePosition, sendTelegram } from "../lib/ai";
+import { clearTop30 } from "../lib/cache";
 import { deleteTrade, normaliseRadarSymbols } from "../lib/journal";
 import { fmtMoney, fmtNum, saveLS, cls } from "../lib/utils";
 import { Badge, Btn, Card, IGear, IRadar, IShield, IZap, Stat, useToast } from "./ui";
@@ -216,7 +217,7 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
 
         <Card icon={<IRadar size={15} />} title="Top Setups Radar (display layer)">
           <label className="block">
-            <span className={lbl}>SYMBOL UNIVERSE · one per line or comma-separated (uppercase, deduped)</span>
+            <span className={lbl}>CUSTOM WATCHLIST · additions to the top-30 (one per line / comma-separated, uppercase, deduped)</span>
             <textarea rows={4} defaultValue={s.radarSymbols.join("\n")}
               onBlur={(e) => {
                 const list = normaliseRadarSymbols(e.target.value);
@@ -228,24 +229,42 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
           </label>
           <div className="mt-3 grid grid-cols-2 gap-3">
             <label className="block">
-              <span className={lbl}>QUALITY FLOOR (0–100)</span>
+              <span className={lbl}>QUALITY FLOOR (0–100 · default 65)</span>
               <input type="number" min={0} max={100} defaultValue={s.radarQualityFloor}
                 onBlur={(e) => {
-                  const v = Math.max(0, Math.min(100, Number(e.target.value) || 55));
+                  const v = Math.max(0, Math.min(100, Number(e.target.value) || 65));
                   e.target.value = String(v);
                   save({ radarQualityFloor: v }, `Radar quality floor: ${v}`);
                 }} className={inp} />
             </label>
-            <div className="flex items-end pb-1">
-              <button type="button" onClick={() => save({ radarSound: !s.radarSound }, `Radar sound ${!s.radarSound ? "on" : "off"}`)}
-                className={cls("tv-btn flex w-full items-center justify-between rounded-md border px-3 py-2 font-mono text-[10.5px] font-bold tracking-widest",
-                  s.radarSound ? "border-bull-600 bg-bull-500/12 text-bull-400" : "border-ink-600 text-fog-400")}>
-                <span>ALERT SOUND</span><span>{s.radarSound ? "ON" : "OFF"}</span>
-              </button>
-            </div>
+            <label className="block">
+              <span className={lbl}>QUANTITY FLOOR (0–100 · default 50)</span>
+              <input type="number" min={0} max={100} defaultValue={s.quantityFloor}
+                onBlur={(e) => {
+                  const v = Math.max(0, Math.min(100, Number(e.target.value) || 50));
+                  e.target.value = String(v);
+                  save({ quantityFloor: v }, `Radar quantity floor: ${v}`);
+                }} className={inp} />
+            </label>
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <button type="button" onClick={() => save({ radarUseTop30: !s.radarUseTop30 }, `Top-30 universe ${!s.radarUseTop30 ? "on" : "off"}`)}
+              className={cls("tv-btn flex items-center justify-between rounded-md border px-3 py-2 font-mono text-[10.5px] font-bold tracking-widest",
+                s.radarUseTop30 ? "border-bull-600 bg-bull-500/12 text-bull-400" : "border-ink-600 text-fog-400")}>
+              <span>TOP-30 USDT UNIVERSE</span><span>{s.radarUseTop30 ? "ON" : "OFF"}</span>
+            </button>
+            <button type="button" onClick={() => { void clearTop30().then(() => toast.push("info", "Top-30 cache cleared — refetches on next radar open/scan")); }}
+              className="tv-btn flex items-center justify-between rounded-md border border-ink-600 px-3 py-2 font-mono text-[10.5px] font-bold tracking-widest text-fog-400 hover:border-gold-600 hover:text-gold-300">
+              <span>RESYNC TOP-30 NOW</span><span>↻</span>
+            </button>
+            <button type="button" onClick={() => save({ radarSound: !s.radarSound }, `Radar sound ${!s.radarSound ? "on" : "off"}`)}
+              className={cls("tv-btn flex items-center justify-between rounded-md border px-3 py-2 font-mono text-[10.5px] font-bold tracking-widest sm:col-span-2",
+                s.radarSound ? "border-bull-600 bg-bull-500/12 text-bull-400" : "border-ink-600 text-fog-400")}>
+              <span>ALERT SOUND</span><span>{s.radarSound ? "ON" : "OFF"}</span>
+            </button>
           </div>
           <p className="mt-3 text-[11px] leading-relaxed text-fog-400">
-            The radar re-runs the <span className="text-fog-200">same live engine</span> (confirmed candles only) for every symbol on each setup-TF close. It is display-only: no auto-trade, no position sizing. Candidates below the floor are never shown; stale feeds get a DATA STALE badge while others keep scanning.
+            Universe = Binance <span className="text-fog-200">top-30 USDT pairs by 24h quote volume</span> (cached 6h, refreshed automatically) merged with your custom list above, deduped, capped at 30. The radar re-runs the <span className="text-fog-200">same live engine</span> (confirmed candles only) for every symbol on each setup-TF close, batched 4-way so the UI never freezes. Modes are display-only — QUALITY shows up to 5 cards ≥ quality floor, QUANTITY up to 8 ≥ quantity floor, AUTO falls back with a banner. No auto-trade, no position sizing; generation, journal and backtests are never touched by mode filtering.
           </p>
         </Card>
 

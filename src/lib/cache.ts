@@ -222,3 +222,46 @@ export async function getInsight(signalId: string): Promise<CachedInsight | null
     return null;
   }
 }
+
+/* ---------------- AI Chart Review cache (6h TTL, keyed by signalId + chartHash) ---------------- */
+
+export interface CachedChartReview { result: unknown; ts: number }
+const memChart = new Map<string, CachedChartReview>();
+
+export async function putChartReview(signalId: string, chartHash: string, result: unknown): Promise<void> {
+  const key = `chart:${signalId}:${chartHash}`;
+  const value: CachedChartReview = { result, ts: Date.now() };
+  memChart.set(key, value);
+  const db = await openDb();
+  if (!db) return;
+  try {
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    });
+  } catch { /* non-fatal */ }
+}
+
+/** Fresh cached chart review (< 6h) for this exact signal + rendered candles, or null. */
+export async function getChartReview(signalId: string, chartHash: string): Promise<CachedChartReview | null> {
+  const key = `chart:${signalId}:${chartHash}`;
+  const fresh = (v: CachedChartReview) => (Date.now() - v.ts < INSIGHT_TTL_MS ? v : null);
+  const memHit = memChart.get(key);
+  if (memHit) { const f = fresh(memHit); if (f) return f; }
+  const db = await openDb();
+  if (!db) return null;
+  try {
+    const val = await new Promise<CachedChartReview | null>((resolve) => {
+      const tx = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).get(key);
+      req.onsuccess = () => resolve((req.result as CachedChartReview) ?? null);
+      req.onerror = () => resolve(null);
+    });
+    return val ? fresh(val) : null;
+  } catch {
+    return null;
+  }
+}

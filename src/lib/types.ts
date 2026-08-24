@@ -328,6 +328,57 @@ export type InsightState =
   | { status: "done"; result: AiInsightResult }
   | { status: "unavailable"; message: string };
 
+/* ---------------- AI Chart Review (additive, display-only) ---------------- */
+
+export type ChartAgreement = "AGREE" | "DISAGREE" | "NEUTRAL";
+
+/** Compact structured payload sent with the PNG snapshots (mode: "chartReview"). */
+export interface ChartReviewPayload {
+  mode: "chartReview";
+  signalId: string;
+  chartHash: string;               // hash of the confirmed candles rendered (cache key part)
+  symbol: string;
+  timeframe: string;
+  direction: "Long" | "Short";
+  score: number;
+  confluences: string[];
+  entry: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  invalidationLevel: number;
+  costInR: number;
+  session: string;
+  htfBias: Bias;
+  /** two small PNG snapshots (base64, quality 0.6); empty in the text-only fallback */
+  stfPng?: string;
+  htfPng?: string;
+  /** text-only fallback: last 20 confirmed candles + engine levels */
+  textOnly?: { candles: string[]; levels: string[] };
+}
+
+export interface ChartRefinement { price: number | null; reason: string }
+
+export interface ChartReviewResult {
+  structureCheck: string;                      // free-text read of visible structure
+  refineEntry: ChartRefinement | null;         // price/reason or null
+  refineInvalidation: (ChartRefinement & { rejected?: boolean }) | null; // "rejected" if wider than engine SL
+  agreement: ChartAgreement;
+  confidence: number;                          // 0–100, clamped
+  risks: string[];                             // ≤ 3 bullets, enforced
+  disclaimer: string;                          // fixed constant, enforced client-side
+  textOnly: boolean;                           // true when the text fallback was used
+  generatedAt: number;
+  cached: boolean;
+  source: "server" | "local" | "cache";
+}
+
+export type ChartReviewState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "done"; result: ChartReviewResult }
+  | { status: "unavailable"; message: string };
+
 export interface InvalidCheck { id: InvalidCheckId; label: string; hit: boolean; detail: string }
 
 export type RadarStatus = "active" | "invalidated" | "expired";
@@ -397,6 +448,8 @@ export interface Trade {
   exitReason?: ExitReason | null;
   /** AI Insight stance at log time — to measure insight accuracy later */
   insightStance?: InsightStance | "none";
+  /** AI Chart Review agreement at log time (only when chart review was used) */
+  chartAgreement?: ChartAgreement | "none";
 }
 
 export interface AlertRule {

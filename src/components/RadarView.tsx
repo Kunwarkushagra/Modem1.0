@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AssetType, Bias, InsightState, RadarCandidate, RadarTf, RawUniverseEntry, ScanFunnel, Settings, SymbolScanState, Timeframe, Trade } from "../lib/types";
+import type { AssetType, Bias, ChartReviewState, InsightState, RadarCandidate, RadarTf, RawUniverseEntry, ScanFunnel, Settings, SymbolScanState, Timeframe, Trade } from "../lib/types";
 import { radarBeep, revalidateCandidate, scanSymbol, scanUniverse } from "../lib/radar";
 import type { BatchProgress } from "../lib/radar";
 import { buildInsightPayload, requestInsight } from "../lib/aiInsight";
+import { buildChartArtifacts, requestChartReview } from "../lib/chartReview";
 import { COSTS } from "../lib/backtest";
 import { fetchLastPrice, fetchUniverseRaw } from "../lib/marketData";
 import { getTop30, putTop30, TOP30_TTL_MS } from "../lib/cache";
@@ -11,7 +12,7 @@ import type { ExcludedEntry, UniverseCfg } from "../lib/universe";
 import { addTrade, loadTrades } from "../lib/journal";
 import { loadFrequencyGate, TM_VARIANTS, variantById } from "../lib/tmVariant";
 import { cls, fmtIST, fmtPrice, fmtTime, TF_MINUTES } from "../lib/utils";
-import { Badge, Btn, Card, IBrain, ICheck, IPlus, IRadar, IRefresh, IWarn, IX, Segmented, useToast } from "./ui";
+import { Badge, Btn, Card, IBrain, ICandles, ICheck, IPlus, IRadar, IRefresh, IWarn, IX, Segmented, useToast } from "./ui";
 
 const blank = (symbol: string): SymbolScanState => ({ symbol, status: "idle", lastScanAt: 0, lastCloseEpoch: 0, lastPrice: null, error: null, candidatesFound: 0 });
 const ZERO_FUNNEL: ScanFunnel = { generated: 0, passedGates: 0, passedFloor: 0 };
@@ -136,6 +137,25 @@ function RadarCard(props: {
     else setInsight({ status: "done", result: out });
   };
 
+  /* ---- AI Chart Review (additive, display-only — renders confirmed-candle snapshots) ---- */
+  const [chart, setChart] = useState<ChartReviewState>({ status: "idle" });
+  const chartBusy = chart.status === "loading";
+  const chartBlocked = invalidated || expired || !!archived || insightOff;
+
+  const fetchChartReview = async () => {
+    if (chartBusy || chartBlocked) return; // debounced by state; global max-1 concurrency in the module
+    setChart({ status: "loading" });
+    try {
+      const { payload, stfCandles } = await buildChartArtifacts(c, mode);
+      const { promise } = requestChartReview(payload, stfCandles, { localKey: settings.geminiApiKey, model: settings.geminiModel });
+      const out = await promise;
+      if ("unavailable" in out) setChart({ status: "unavailable", message: out.unavailable });
+      else setChart({ status: "done", result: out });
+    } catch (e) {
+      setChart({ status: "unavailable", message: e instanceof Error ? e.message.slice(0, 48) : "SNAPSHOT FAILED" });
+    }
+  };
+
   const logPaper = () => {
     if (inTrade || invalidated || expired || archived) return;
     addTrade({
@@ -147,9 +167,11 @@ function RadarCard(props: {
       signalType: s.signal?.type, signalGeneratedAt: s.signal?.generatedAt,
       signalDisplayIST: s.signal?.displayTimeIST, signalValidTill: s.signal?.validTillTs,
       insightStance: insight.status === "done" ? insight.result.stance : "none",
+      chartAgreement: chart.status === "done" ? chart.result.agreement : "none",
     });
     props.onLogged();
-    toast.push("ok", `${s.direction} ${c.symbol} logged to journal (paper) · insight stance: ${insight.status === "done" ? insight.result.stance : "none"}`);
+    const agr = chart.status === "done" ? chart.result.agreement : "none";
+    toast.push("ok", `${s.direction} ${c.symbol} logged · insight ${insight.status === "done" ? insight.result.stance : "none"} · chart ${agr}`);
   };
 
   return (
@@ -340,12 +362,95 @@ function RadarCard(props: {
         </div>
       )}
 
+      {/* AI CHART REVIEW result — engine vs AI side-by-side; engine stays official */}
+      {chart.status !== "idle" && (
+        <div className="tv-pop border-t border-ink-600/70 px-3.5 py-2">
+          {chart.status === "loading" && (
+            <div className="tv-scanbar flex items-center gap-2 rounded-md border border-ink-600 bg-ink-900/50 px-3 py-2 font-mono text-[10px] tracking-widest text-gold-300">
+              <ICandles size={13} className="tv-blink" /> RENDERING SNAPSHOTS + READING STRUCTURE…
+            </div>
+          )}
+          {chart.status === "unavailable" && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-bear-600/40 bg-bear-500/8 px-3 py-2"
+              title="Exact failure detail — retry is always available; the card stays fully usable">
+              <span className="min-w-0 break-words font-mono text-[10px] font-bold tracking-widest text-bear-300">
+                AI CHART REVIEW FAILED · {chart.message}
+              </span>
+              <span className="flex shrink-0 items-center gap-1.5">
+                <Btn size="xs" variant="ghost" onClick={() => void fetchChartReview()}><IRefresh size={10} /> RETRY</Btn>
+                <Btn size="xs" variant="ghost" onClick={() => setChart({ status: "idle" })}><IX size={10} /></Btn>
+              </span>
+            </div>
+          )}
+          {chart.status === "done" && (() => {
+            const cr = chart.result;
+            const tone = cr.agreement === "AGREE" ? "bull" : cr.agreement === "DISAGREE" ? "bear" : "dim";
+            return (
+              <div className={cls("rounded-md border bg-ink-900/55", cr.agreement === "AGREE" ? "border-bull-600/50" : cr.agreement === "DISAGREE" ? "border-bear-600/50" : "border-ink-500")}>
+                <div className="flex flex-wrap items-center gap-2 border-b border-ink-600/60 px-3 py-1.5">
+                  <ICandles size={13} className="text-fog-400" />
+                  <span className="font-mono text-[9.5px] font-bold tracking-[0.18em] text-fog-400">AI OPINION · CHART</span>
+                  <Badge tone={tone} className="text-[10px] font-bold">{cr.agreement}</Badge>
+                  <span className="font-mono text-[9.5px] text-fog-500">CONF {cr.confidence}/100</span>
+                  {cr.textOnly && <Badge tone="warn" className="text-[8.5px]">TEXT-ONLY ANALYSIS</Badge>}
+                  {cr.cached && <Badge tone="info" className="text-[8.5px]">CACHED</Badge>}
+                  <span className="ml-auto font-mono text-[8.5px] tracking-wider text-fog-500">{fmtIST(cr.generatedAt)} · {cr.source.toUpperCase()}</span>
+                </div>
+
+                {/* engine vs AI, side-by-side */}
+                <div className="grid grid-cols-1 gap-2 px-3 py-2 sm:grid-cols-2">
+                  <div className="rounded border border-ink-600/60 bg-ink-800/40 p-2">
+                    <div className="mb-1 font-mono text-[8.5px] font-bold tracking-[0.16em] text-gold-400">ENGINE (OFFICIAL)</div>
+                    <div className="space-y-0.5 font-mono text-[9.5px] text-fog-300">
+                      <div>ENTRY <span className="text-gold-300">{fmtPrice(s.entry_price, A)}</span></div>
+                      <div>STOP <span className="text-bear-400">{fmtPrice(s.stop_loss, A)}</span></div>
+                      <div>INVALIDATION <span className="text-info-400">{fmtPrice(s.invalidation_level, A)}</span></div>
+                    </div>
+                  </div>
+                  <div className="rounded border border-ink-600/60 bg-ink-800/40 p-2">
+                    <div className="mb-1 font-mono text-[8.5px] font-bold tracking-[0.16em] text-info-400">AI READ</div>
+                    <div className="space-y-0.5 font-mono text-[9.5px] text-fog-300">
+                      {cr.refineEntry?.price != null && <div>ENTRY → <span className="text-gold-300">{fmtPrice(cr.refineEntry.price, A)}</span></div>}
+                      {cr.refineInvalidation?.price != null && (
+                        <div>INVALIDATION → <span className={cr.refineInvalidation.rejected ? "text-bear-400 line-through" : "text-info-400"}>{fmtPrice(cr.refineInvalidation.price, A)}</span>
+                          {cr.refineInvalidation.rejected && <Badge tone="bear" className="ml-1 text-[8px]">REJECTED — WIDER THAN ENGINE SL</Badge>}
+                        </div>
+                      )}
+                      {!cr.refineEntry && !cr.refineInvalidation && <div className="text-fog-500">no level refinements proposed</div>}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5 px-3 pb-2 font-mono text-[10px] leading-relaxed">
+                  <p className="text-fog-200">{cr.structureCheck}</p>
+                  {cr.refineEntry?.reason && <p className="text-fog-400">ENTRY NOTE: {cr.refineEntry.reason}</p>}
+                  {cr.refineInvalidation?.reason && !cr.refineInvalidation.rejected && <p className="text-fog-400">INV NOTE: {cr.refineInvalidation.reason}</p>}
+                  {cr.risks.length > 0 && (
+                    <ul className="space-y-0.5">
+                      {cr.risks.map((k, i) => (
+                        <li key={i} className="flex items-start gap-1.5 text-gold-300/90"><IWarn size={10} className="mt-0.5 shrink-0" /><span>{k}</span></li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="border-t border-ink-600/50 pt-1.5 text-[9px] italic text-fog-500">{cr.disclaimer} · Engine levels remain official.</p>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       <div className="mt-auto flex flex-wrap items-center gap-1.5 border-t border-ink-600/70 px-3.5 py-2">
         <span className="mr-auto font-mono text-[9px] text-fog-500">DISPLAY ONLY — NO AUTO-TRADE, NO SIZE ADVICE</span>
         <Btn size="xs" variant={insightOff ? "ghost" : "outline"} disabled={insightBlocked || insightBusy}
           title={insightOff ? "Enable AI Insight in Settings" : expired || invalidated ? "Signal no longer valid — insight disabled" : "Independent opinion on this exact signal (structured payload only)"}
           onClick={() => void fetchInsight()}>
           <IBrain size={11} /> {insightOff ? "AI OFF" : insightBusy ? "REVIEWING…" : "GET AI INSIGHT"}
+        </Btn>
+        <Btn size="xs" variant={insightOff ? "ghost" : "outline"} disabled={chartBlocked || chartBusy}
+          title={insightOff ? "Enable AI in Settings" : expired || invalidated ? "Signal no longer valid — chart review disabled" : "Render chart snapshots and ask the AI to read the structure (engine stays official)"}
+          onClick={() => void fetchChartReview()}>
+          <ICandles size={11} /> {insightOff ? "AI OFF" : chartBusy ? "RENDERING…" : "AI CHART REVIEW"}
         </Btn>
         <Btn size="xs" variant="ghost" disabled={inTrade || invalidated || expired || !!archived}
           title="Log this signal to the paper journal with the current insight stance"

@@ -32,8 +32,10 @@ export const DEFAULT_SETTINGS: Settings = {
   aiInsightEnabled: true,
   geminiApiKey: "",
   geminiModel: "gemini-2.0-flash",
-  universeExcludedBases: [],
+  universeExtraExcludes: "",
   universeMinQuoteVolume: 50_000_000,
+  universeVolFloorPct: 1.5,
+  universeChangeCapPct: 25,
 };
 
 /** Validate + normalise the radar universe: uppercase, trim, dedupe, force USDT/USDC quote for crypto. */

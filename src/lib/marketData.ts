@@ -1,4 +1,4 @@
-import type { AssetType, Candle, Timeframe } from "./types";
+import type { AssetType, Candle, RawUniverseEntry, Timeframe } from "./types";
 import { fetchWithTimeout, hashStr, mulberry32, normSymbol, okxInstId, stooqSymbol, TF_MINUTES, withRetries, yahooSymbol } from "./utils";
 
 export interface FetchResult { candles: Candle[]; source: string; simulated: boolean }
@@ -240,45 +240,13 @@ export async function fetchLastPrice(rawSymbol: string, asset: AssetType, tf: Ti
 const LEVERAGED_RE = /(UP|DOWN|BULL|BEAR)$/;
 
 /**
- * Universe Hygiene Guards v2 — data-level filters applied to the top-30 dynamic
- * universe BEFORE scanning. Display-only: they never touch entry gates, V1-V6,
- * validity, reasoning, or backtest logic.
+ * Raw universe feed: top USDT pairs by 24h quote volume (Binance /api/v3/ticker/24hr)
+ * WITH full 24h stats. Deliberately unfiltered except for obviously invalid rows and
+ * leveraged-token bases — every hygiene decision (stablecoins, volatility floor,
+ * volume floor, change cap, warm-up) lives in lib/universe.ts where it is pure,
+ * user-configurable, and visible in the UI. Cached in IndexedDB, refreshed every 6h.
  */
-export interface UniverseGuardConfig {
-  /** additional user-configured base exclusions (merged with the hard stablecoin list) */
-  excludedBases: string[];
-  /** min 24h quote volume in USDT (default 50M) */
-  minQuoteVolume: number;
-}
-export const DEFAULT_UNIVERSE_GUARDS: UniverseGuardConfig = { excludedBases: [], minQuoteVolume: 50_000_000 };
-
-/** Hard stablecoin / fiat-pegged base exclusions (guard 1). */
-export const STABLECOIN_BASES = [
-  "USDC", "USDP", "TUSD", "FDUSD", "BUSD", "DAI", "USDE", "PYUSD",
-  "EURI", "RLUSD", "AEUR", "EURC", "USD1", "USDTB",
-  "EUR", "GBP", "TRY", "BRL", "ARS",
-];
-
-const VOL_FLOOR_PCT = 1.5;      // guard 2: 24h high-low range >= 1.5%
-const CHANGE_CAP_PCT = 25;      // guard 4: |24h price change| <= 25%
-
-interface TickerRow {
-  symbol: string; base: string; qv: number; last: number; high: number; low: number; changePct: number;
-}
-
-function hygienePass(t: TickerRow, excluded: Set<string>, minQv: number): boolean {
-  if (excluded.has(t.base)) return false;                       // guard 1: stablecoins/fiat + custom
-  if (LEVERAGED_RE.test(t.base)) return false;                  // leveraged tokens
-  const rangePct = t.low > 0 ? ((t.high - t.low) / t.low) * 100 : 0;
-  if (rangePct < VOL_FLOOR_PCT) return false;                   // guard 2: volatility floor
-  if (t.qv <= minQv) return false;                              // guard 3: min quote volume
-  if (Math.abs(t.changePct) > CHANGE_CAP_PCT) return false;     // guard 4: runaway price move
-  return true;
-}
-
-export async function fetchTop30Usdt(cfg: UniverseGuardConfig = DEFAULT_UNIVERSE_GUARDS, limit = 30): Promise<string[]> {
-  const excluded = new Set([...STABLECOIN_BASES, ...cfg.excludedBases.map((b) => b.toUpperCase().trim()).filter(Boolean)]);
-  const minQv = Number.isFinite(cfg.minQuoteVolume) && cfg.minQuoteVolume > 0 ? cfg.minQuoteVolume : DEFAULT_UNIVERSE_GUARDS.minQuoteVolume;
+export async function fetchUniverseRaw(limit = 30): Promise<RawUniverseEntry[]> {
   let err: unknown = null;
   for (const base of BINANCE_BASES) {
     try {
@@ -291,20 +259,18 @@ export async function fetchTop30Usdt(cfg: UniverseGuardConfig = DEFAULT_UNIVERSE
         .filter((t) => t.symbol.endsWith("USDT"))
         .map((t) => ({
           symbol: t.symbol, base: t.symbol.slice(0, -4),
-          qv: Number(t.quoteVolume), last: Number(t.lastPrice),
-          high: Number(t.highPrice), low: Number(t.lowPrice),
-          changePct: Number(t.priceChangePercent),
+          lastPrice: Number(t.lastPrice), highPrice: Number(t.highPrice), lowPrice: Number(t.lowPrice),
+          quoteVolume: Number(t.quoteVolume), changePct: Number(t.priceChangePercent),
         }))
-        .filter((t) => t.last > 0 && t.qv > 0 && t.high > 0 && t.low > 0)
-        .filter((t) => hygienePass(t, excluded, minQv))
-        .sort((a, b) => b.qv - a.qv)
-        .slice(0, limit)
-        .map((t) => t.symbol);
+        .filter((t) => t.lastPrice > 0 && t.quoteVolume > 0 && t.highPrice > 0 && t.lowPrice > 0)
+        .filter((t) => t.base.length >= 2 && !LEVERAGED_RE.test(t.base))
+        .sort((a, b) => b.quoteVolume - a.quoteVolume)
+        .slice(0, limit);
       if (ranked.length >= 10) return ranked;
       throw new Error("ticker too short");
     } catch (e) { err = e; }
   }
-  throw err instanceof Error ? err : new Error("top30 unreachable");
+  throw err instanceof Error ? err : new Error("universe feed unreachable");
 }
 
 export interface TickerQuote { symbol: string; label: string; price: number; changePct: number; asset: AssetType }

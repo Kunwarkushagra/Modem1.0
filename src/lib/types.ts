@@ -248,6 +248,27 @@ export type ExitReason = "SL" | "TP1" | "TP2" | "BE" | "time-exit" | "invalidati
 
 export type RadarTf = "5m" | "15m" | "1h" | "4h";
 
+/* ---- Universe hygiene guards v2 (data-level, display layer only) ---- */
+
+/** One row of the Binance 24h ticker, pre-guard. */
+export interface RawUniverseEntry {
+  symbol: string;      // e.g. BTCUSDT
+  base: string;        // e.g. BTC
+  lastPrice: number;
+  highPrice: number;
+  lowPrice: number;
+  quoteVolume: number; // 24h, in quote asset (USDT)
+  changePct: number;   // 24h price change %
+}
+
+/**
+ * Sighting roster: how many CONSECUTIVE 6h top-30 refreshes each symbol has
+ * appeared in. A symbol is scannable only at ≥ 2 consecutive sightings
+ * ("NEW — WARMING UP" until then). Dropping out of the list resets the count.
+ */
+export interface RosterEntry { consecutive: number; firstSeenAt: number; lastSeenAt: number }
+export type Roster = Record<string, RosterEntry>;
+
 export interface RadarScoreBreakdown {
   htfBias: number;          // /20 aligned 20 · ranging 8 · against 0
   liquidity: number;        // /20 grade A 20 · B 13 · C 7 · none 0, distance penalty up to −4
@@ -409,13 +430,15 @@ export interface Settings {
   radarUseTop30: boolean;       // merge Binance top-30 USDT by 24h quote volume (6h cache)
   radarSound: boolean;
   radarTmVariant: TmVariantId;  // which management variant the radar cards describe
-  /* ---- Universe Hygiene Guards v2 (data-level, display-only) ---- */
-  universeExcludedBases: string[];  // extra base exclusions on top of the hard stablecoin list
-  universeMinQuoteVolume: number;   // min 24h quote volume in USDT (default 50M)
   /* ---- AI Insight (opinion layer; server route reads GEMINI_API_KEY from env in production) ---- */
   aiInsightEnabled: boolean;
   geminiApiKey: string;         // static-build fallback only; stays in this browser, never logged
   geminiModel: string;          // default gemini-2.0-flash
+  /* ---- Universe hygiene guards v2 (data-level, pre-scan; user-tunable, never auto-tuned) ---- */
+  universeExtraExcludes: string;   // comma-separated extra bases on top of the hard stablecoin list
+  universeMinQuoteVolume: number;  // 24h quote-volume floor, USDT (default 50M)
+  universeVolFloorPct: number;     // 24h high-low range floor, % (default 1.5)
+  universeChangeCapPct: number;    // |24h change| cap, % (default 25)
 }
 
 export interface BacktestTrade {

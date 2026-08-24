@@ -3,7 +3,7 @@ import type {
   PerformanceSummary, SignalType, TmMode, TradeOutcome,
 } from "./types";
 import { fetchHistory } from "./marketData";
-import { computeIndicators } from "./indicators";
+import { computeIndicators, atr } from "./indicators";
 import { analyzeSMC } from "./smc";
 import { deriveBias, localSetups, validateSetup } from "./ai";
 import type { EngineCtx } from "./ai";
@@ -91,6 +91,11 @@ export async function runBacktestOnCandles(
   let shieldLimitFilled = false;
   let openMaxR = 0;                       // max favourable excursion in R since entry
   let missNoConfirm = 0, missLimitChase = 0, missLimitUnfilled = 0, staleExits = 0;
+  // runner v1.0.0 (exit-only) — trailing structure state
+  let runnerTrail = 0;                    // trailing stop for the runner leg, floored at breakeven
+  let structRef = 0;                      // most recent confirmed opposite-side fractal (lower-low for longs / higher-high for shorts)
+  // setup-TF ATR(14) for the whole series — Wilder is causal, so atrArr[i] uses only candles ≤ i (no lookahead)
+  const atrArr = tmMode === "runner" ? atr(candles, 14) : [];
 
   /** Full-weight close (whole position on one leg pair). Used by classic always; tm110 for pre-partial stops and un-partialed time marks. */
   const fullClose = (t: BacktestTrade, exitPrice: number, kind: ExitKind, i: number) => {
@@ -105,6 +110,7 @@ export async function runBacktestOnCandles(
     t.outcome = outcome;
     t.partialHit = false;
     t.exitKind = kind;
+    t.holdBars = i - t.i;
     trades.push(t);
     funnel[outcome === "win" ? "wins" : outcome === "loss" ? "losses" : "breakeven"]++;
     cooldownUntil = i + 3;
@@ -129,6 +135,7 @@ export async function runBacktestOnCandles(
     t.outcome = outcome;
     t.partialHit = true;
     t.exitKind = kind;
+    t.holdBars = i - t.i;
     trades.push(t);
     funnel[outcome === "win" ? "wins" : outcome === "loss" ? "losses" : "breakeven"]++;
     cooldownUntil = i + 3;
@@ -171,6 +178,51 @@ export async function runBacktestOnCandles(
           else if (hitTp1 && !trailing) { trailing = true; openSl = openFill; }
           if (open && trailing && (long ? c.l <= openFill : c.h >= openFill)) { fullClose(open, openFill, "be", i); }
           if (open && i - openStartI >= forwardMax) { fullClose(open, c.c, "time", i); }
+        } else if (tmMode === "runner") {
+          /* runner v1.0.0 — exit-management only. Entry, SL, gates are the baseline's.
+             Phase 1 (pre-partial): structural SL, partial fill at +1R, 40-candle stale cut.
+             Phase 2 (runner): 1.5×ATR trail floored at BE, opposite CHoCH/BOS exit, no TP2, no time limit. */
+          if (!tmPartialDone) {
+            const hitSl = long ? c.l <= openSl : c.h >= openSl;
+            const hitPart = long ? c.h >= tmPartial : c.l <= tmPartial;
+            if (hitSl) { fullClose(open, openSl, "stop", i); }                     // adverse ambiguity: stop first
+            else if (hitPart) {
+              tmPartialDone = true;                                                // book 50% @ +1R, SL → BE
+              openSl = openFill;
+              runnerTrail = openFill;                                              // trail starts at breakeven
+              structRef = long ? -Infinity : Infinity;                             // reset structure reference
+            }
+            // stale cut: +1R partial not reached within 40 exec candles → full market close
+            if (open && !tmPartialDone && i - openStartI >= 40) { staleExits++; fullClose(open, c.c, "stale", i); }
+          } else {
+            // opposite-structure exit: confirmed fractal at j = i-3 (3 bars late, no lookahead).
+            // Long: a new lower-low (fractal low below the last one) = bearish BOS/CHoCH → exit.
+            // Short: a new higher-high (fractal high above the last one) = bullish BOS/CHoCH → exit.
+            const j = i - 3;
+            if (open && j > openStartI && j >= 3) {
+              if (long && isFractalLow(candles, j)) {
+                if (candles[j].l < structRef) { tmClose(open, c.c, "struct", i); }  // lower-low → bearish break
+                else { structRef = Math.max(structRef, candles[j].l); }
+              } else if (!long && isFractalHigh(candles, j)) {
+                if (candles[j].h > structRef) { tmClose(open, c.c, "struct", i); }  // higher-high → bullish break
+                else { structRef = Math.min(structRef, candles[j].h); }
+              }
+            }
+            if (open) {
+              // trail exit: test against the trail level set from the PREVIOUS close (no lookahead)
+              const hitTrail = long ? c.l <= runnerTrail : c.h >= runnerTrail;
+              if (hitTrail) {
+                const exitPx = long ? Math.min(c.o, runnerTrail) : Math.max(c.o, runnerTrail); // gap-aware, conservative
+                const kind: ExitKind = Math.abs(exitPx - openFill) < openRisk * 0.02 ? "be" : "target";
+                tmClose(open, exitPx, kind, i);
+              } else {
+                // ratchet the trail from this confirmed close (floored at breakeven); applies next candle
+                const a = isFinite(atrArr[i]) && atrArr[i] > 0 ? atrArr[i] : 0;
+                if (a > 0) runnerTrail = long ? Math.max(runnerTrail, c.c - 1.5 * a) : Math.min(runnerTrail, c.c + 1.5 * a);
+              }
+            }
+            // no time limit on the runner after the partial — it runs until trail or structure exit
+          }
         } else {
           // tm110: partial @ +1.0R (conservative same-candle fill), then runner with SL at breakeven
           if (!tmPartialDone) {
@@ -249,12 +301,18 @@ export async function runBacktestOnCandles(
         openFill = fill; openSl = sl; openTp1 = tp1; openTp2 = tp2; openRisk = risk;
         trailing = false; openStartI = ii; manageFromI = ii; openMaxR = 0;
         const dirSign = tr.direction === "Long" ? 1 : -1;
-        if (tmMode === "tm110") {
+        if (tmMode === "tm110" || tmMode === "runner") {
           tmPartial = fill + dirSign * risk * 1.0;                                   // TP-PARTIAL = +1.0R
-          const tp2dist = Math.abs(tp2 - fill) / risk;
-          // RUNNER = original TP2 logic (2nd pool / range extreme) if objective & beyond the partial, else original TP1 floor
-          tmRunner = p.setup.tp2_objective && tp2dist > 1.0 ? tp2 : tp1;
           tmPartialDone = false;
+          if (tmMode === "tm110") {
+            const tp2dist = Math.abs(tp2 - fill) / risk;
+            // RUNNER = original TP2 logic (2nd pool / range extreme) if objective & beyond the partial, else original TP1 floor
+            tmRunner = p.setup.tp2_objective && tp2dist > 1.0 ? tp2 : tp1;
+          } else {
+            // runner: no fixed TP2 — the trail starts at breakeven and structure ref is reset
+            runnerTrail = fill;
+            structRef = tr.direction === "Long" ? -Infinity : Infinity;
+          }
         }
         funnel.entered++;
         pending = null; triggered = false;
@@ -348,7 +406,7 @@ export async function runBacktestOnCandles(
   // force-close anything still open at the last confirmed candle
   if (open) {
     const lastC = candles[end - 1]?.c ?? openFill;
-    if (tmMode === "tm110" && tmPartialDone) tmClose(open, lastC, "time", end - 1);
+    if ((tmMode === "tm110" || tmMode === "runner") && tmPartialDone) tmClose(open, lastC, "time", end - 1);
     else fullClose(open, lastC, "time", end - 1);
   }
 
@@ -368,11 +426,16 @@ export async function runBacktestOnCandles(
 
   const n = trades.length;
   const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+  const partials = trades.filter((t) => t.partialHit);
   const agg = {
     grossPerTrade: mean(trades.map((t) => t.grossR)),
     costPerTrade: mean(trades.map((t) => t.feesR)),
     netPerTrade: meanR,
-    partialRate: n ? (trades.filter((t) => t.partialHit).length / n) * 100 : 0,
+    partialRate: n ? (partials.length / n) * 100 : 0,
+    // runner smoke: losses that became BE/small after the partial (partial filled, then stopped at ~BE)
+    beAfterPartialRate: n ? (trades.filter((t) => t.partialHit && t.exitKind === "be").length / n) * 100 : 0,
+    // runner smoke: avg candles the runner leg stayed open (partial-fill trades only)
+    avgRunnerHoldBars: mean(partials.map((t) => t.holdBars ?? 0)),
     beRate: n ? (trades.filter((t) => t.exitKind === "be").length / n) * 100 : 0,
     stopOutRate: n ? (trades.filter((t) => t.exitKind === "stop").length / n) * 100 : 0,
     avgWinR: mean(wins.map((t) => t.pnlR)),
@@ -408,6 +471,23 @@ export async function runBacktestOnCandles(
     durationMs: performance.now() - t0,
     dataSource,
   };
+}
+
+/**
+ * runner v1.0.0 — confirmed fractal pivots (k=3). A pivot at index j is only "confirmed"
+ * once candle j+3 exists, so checking the pivot at j = i-3 on candle i is lookahead-free.
+ */
+function isFractalLow(cs: Candle[], j: number): boolean {
+  if (j < 3 || j + 3 >= cs.length) return false;
+  const l = cs[j].l;
+  for (let k = j - 3; k <= j + 3; k++) if (k !== j && cs[k].l < l) return false;
+  return true;
+}
+function isFractalHigh(cs: Candle[], j: number): boolean {
+  if (j < 3 || j + 3 >= cs.length) return false;
+  const h = cs[j].h;
+  for (let k = j - 3; k <= j + 3; k++) if (k !== j && cs[k].h > h) return false;
+  return true;
 }
 
 /** Convenience wrapper: fetch history, then run the core engine for a specific variant. */

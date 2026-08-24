@@ -1,12 +1,12 @@
 import type {
-  BacktestTrade, BenchReport, BenchSegment, BenchWindowReport, BenchWindowSpec, SegmentStats,
-  ThresholdCheck, Timeframe,
+  BacktestTrade, BenchReport, BenchSegment, BenchWindowReport, BenchWindowSpec, RunnerSmokeReport,
+  SegmentStats, SmokeArm, ThresholdCheck, Timeframe,
 } from "./types";
-import { contaminationNotice, describeConfig, SMOKE_CONFIG } from "./benchConfig";
+import { contaminationNotice, describeConfig, describeRunnerConfig, RUNNER_SMOKE, SMOKE_CONFIG } from "./benchConfig";
 import type { PhaseConfig } from "./benchConfig";
 import { fetchHistory } from "./marketData";
 import { runBacktestOnCandles } from "./backtest";
-import { BASELINE_VARIANT, freqFloor, LS_BENCH_KEY, MIN_VAL_TRADES, PASS_THRESHOLDS, TEST_VARIANT, TM_VARIANTS } from "./tmVariant";
+import { BASELINE_VARIANT, freqFloor, LS_BENCH_KEY, LS_RUNNER_KEY, MIN_VAL_TRADES, PASS_THRESHOLDS, TEST_VARIANT, TM_VARIANTS, variantById } from "./tmVariant";
 import type { TmVariantId } from "./tmVariant";
 import { loadLS, saveLS, TF_MINUTES } from "./utils";
 
@@ -278,4 +278,111 @@ export async function runBenchmark(
     log(`FREQUENCY GUARD PASSED — ${config.variantSlot} additions remain live`, "ok");
   }
   return report;
+}
+
+/* ================= runner-v1.0.0 smoke test (exit-management variant) ================= */
+
+interface ArmAcc { entries: number; trades: BacktestTrade[]; missNoConfirm: number; missLimitChase: number; missLimitUnfilled: number; staleExits: number }
+
+function armFromAcc(variantId: string, acc: ArmAcc): SmokeArm {
+  const trades = acc.trades;
+  const n = trades.length;
+  const wins = trades.filter((t) => t.outcome === "win");
+  const losses = trades.filter((t) => t.outcome === "loss");
+  const decided = wins.length + losses.length;
+  const grossW = wins.reduce((s, t) => s + t.pnlR, 0);
+  const grossL = Math.abs(losses.reduce((s, t) => s + t.pnlR, 0));
+  const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+  let cum = 0, peak = 0, dd = 0;
+  for (const t of trades) { cum += t.pnlR; peak = Math.max(peak, cum); dd = Math.max(dd, peak - cum); }
+  const partials = trades.filter((t) => t.partialHit);
+  return {
+    variantId,
+    entries: acc.entries,
+    trades: n,
+    winRate: decided ? (wins.length / decided) * 100 : 0,
+    slHitRate: n ? (trades.filter((t) => t.exitKind === "stop").length / n) * 100 : 0,
+    grossPerTrade: mean(trades.map((t) => t.grossR)),
+    costPerTrade: mean(trades.map((t) => t.feesR)),
+    netPerTrade: mean(trades.map((t) => t.pnlR)),
+    profitFactor: grossL > 0 ? Math.min(99, grossW / grossL) : grossW > 0 ? 99 : 0,
+    maxDrawdownR: dd,
+    avgWinR: mean(wins.map((t) => t.pnlR)),
+    avgLossR: mean(losses.map((t) => t.pnlR)),
+    partialRate: n ? (partials.length / n) * 100 : 0,
+    beAfterPartialRate: n ? (trades.filter((t) => t.partialHit && t.exitKind === "be").length / n) * 100 : 0,
+    avgRunnerHoldBars: mean(partials.map((t) => t.holdBars ?? 0)),
+    missNoConfirm: acc.missNoConfirm,
+    missLimitChase: acc.missLimitChase,
+    missLimitUnfilled: acc.missLimitUnfilled,
+    staleExits: acc.staleExits,
+  };
+}
+
+/**
+ * Runner smoke: baseline vs runner on a fresh frozen window (BTC/ETH/SOL · 15M · 30d).
+ * Both arms run the IDENTICAL entry pipeline; only exit management differs (runner mode).
+ * GUARD = exact entry-count equality. Any drift means the shared entry path was disturbed → revert.
+ */
+export async function runRunnerSmoke(
+  log: Log,
+  onProgress?: (pct: number) => void,
+  isAborted?: () => boolean,
+): Promise<RunnerSmokeReport> {
+  const t0 = performance.now();
+  const cfg = RUNNER_SMOKE;
+  log(contaminationNotice(), "warn");
+  for (const line of describeRunnerConfig(cfg)) log(line, "info");
+
+  const baseDef = variantById(cfg.baselineSlot as TmVariantId);
+  const varDef = variantById(cfg.variantSlot as TmVariantId);
+  const base: ArmAcc = { entries: 0, trades: [], missNoConfirm: 0, missLimitChase: 0, missLimitUnfilled: 0, staleExits: 0 };
+  const vari: ArmAcc = { entries: 0, trades: [], missNoConfirm: 0, missLimitChase: 0, missLimitUnfilled: 0, staleExits: 0 };
+  let dataSource = "—";
+
+  for (let si = 0; si < cfg.symbols.length; si++) {
+    if (isAborted?.()) break;
+    const symbol = cfg.symbols[si];
+    log(`── ${symbol}: fetching frozen ${cfg.days}d ${cfg.timeframe} candles…`);
+    const hist = await fetchHistory(symbol, "crypto", cfg.timeframe, cfg.days, log, 60000, cfg.anchorEnd);
+    dataSource = hist.source;
+    log(`${symbol}: ${hist.candles.length} candles from ${hist.source} — both arms on this exact series`, "ok");
+    for (const [def, acc] of [[baseDef, base], [varDef, vari]] as const) {
+      const res = await runBacktestOnCandles(
+        hist.candles,
+        { symbol, assetType: "crypto", timeframe: cfg.timeframe, days: cfg.days },
+        def.mode, log,
+        (p) => onProgress?.(Math.round(((si + (def === baseDef ? 0 : 0.5)) / cfg.symbols.length) * 100)),
+        hist.source, def.advQuality, def.slShield,
+      );
+      acc.entries += res.funnel.entered;
+      acc.trades.push(...res.trades);
+      acc.missNoConfirm += res.missNoConfirm; acc.missLimitChase += res.missLimitChase;
+      acc.missLimitUnfilled += res.missLimitUnfilled; acc.staleExits += res.staleExits;
+      log(`${symbol} · ${def.short}: ${res.trades.length} trades · entries ${res.funnel.entered} · WR ${res.winRate.toFixed(0)}% · net/t ${res.netPerTrade.toFixed(3)}R${def.mode === "runner" ? ` · partials ${res.partialRate.toFixed(0)}% · stale ${res.staleExits}` : ""}`);
+    }
+  }
+  onProgress?.(100);
+
+  const baseline = armFromAcc(cfg.baselineSlot, base);
+  const variant = armFromAcc(cfg.variantSlot, vari);
+  const entriesEqual = baseline.entries === variant.entries && baseline.entries > 0;
+  const overallPass = entriesEqual;
+
+  log(`RUNNER SMOKE · entries: baseline ${baseline.entries} vs runner ${variant.entries} → ${entriesEqual ? "EXACT EQUALITY ✓" : "DRIFT ✗ (revert)"}`, entriesEqual ? "ok" : "err");
+  log(`RUNNER SMOKE · net/t: baseline ${baseline.netPerTrade.toFixed(3)}R vs runner ${variant.netPerTrade.toFixed(3)}R · WR ${baseline.winRate.toFixed(0)}% vs ${variant.winRate.toFixed(0)}% · avgWin ${variant.avgWinR.toFixed(2)}R · avgLoss ${variant.avgLossR.toFixed(2)}R`, "info");
+
+  const report: RunnerSmokeReport = {
+    ranAt: Date.now(),
+    window: `${cfg.symbols.map((s) => s.replace("USDT", "")).join("+")} · ${cfg.timeframe.toUpperCase()} · ${cfg.days}D (frozen)`,
+    baseline, variant, entriesEqual, overallPass, dataSource,
+  };
+  saveLS(LS_RUNNER_KEY, report);
+  log(`runner gate stored → ${overallPass ? "PASS (variant qualified for radar)" : "FAIL (variant stays a bench slot / reverted)"}`, overallPass ? "ok" : "warn");
+  log(`runner smoke done in ${((performance.now() - t0) / 1000).toFixed(1)}s`, "ok");
+  return report;
+}
+
+export function loadRunnerSmoke(): RunnerSmokeReport | null {
+  return loadLS<RunnerSmokeReport | null>(LS_RUNNER_KEY, null);
 }

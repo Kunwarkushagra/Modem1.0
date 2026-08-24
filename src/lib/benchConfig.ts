@@ -97,3 +97,40 @@ export function describeConfig(c: PhaseConfig): string[] {
 export function contaminationNotice(): string {
   return `CONTAMINATED — excluded from all runs & decisions, no auto-revert: ${CONTAMINATED_WINDOWS.join(" · ")}`;
 }
+
+/* ---------------- runner-v1.0.0 smoke (exit-management variant) ----------------
+ * Fresh frozen window distinct from the eff2 SMOKE/POWERED anchors, never used before.
+ * Guard = EXACT entry-count equality vs baseline (the entry pipeline must be untouched).
+ */
+const RUNNER_ANCHOR = Date.UTC(2026, 2, 1, 0, 0, 0); // 2026-03-01 00:00 UTC (fresh)
+
+export interface RunnerSmokeConfig {
+  phase: "RUNNER-SMOKE";
+  variantSlot: string;
+  baselineSlot: string;
+  symbols: string[];
+  timeframe: Timeframe;
+  days: number;
+  anchorEnd: number;
+}
+
+export const RUNNER_SMOKE: RunnerSmokeConfig = {
+  phase: "RUNNER-SMOKE",
+  variantSlot: "scalp10-runner-v1.0.0",
+  baselineSlot: BASELINE_SLOT,
+  symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+  timeframe: "15m",
+  days: 30,
+  anchorEnd: RUNNER_ANCHOR,
+};
+
+export function describeRunnerConfig(c: RunnerSmokeConfig): string[] {
+  const start = c.anchorEnd - c.days * 86_400_000;
+  return [
+    `PHASE ${c.phase} · VARIANT SLOT: ${c.variantSlot} · BASELINE: ${c.baselineSlot}`,
+    `FROZEN WINDOW: ${iso(start)} → ${iso(c.anchorEnd)} (${c.days}d, anchor ${c.anchorEnd})`,
+    `SYMBOLS (${c.symbols.length}): ${c.symbols.join(" ")}`,
+    `SETUP TF: ${c.timeframe.toUpperCase()} · EXIT-MANAGEMENT ONLY (entry pipeline = baseline)`,
+    `GUARD: EXACT entry-count equality vs baseline — any drift reverts the variant`,
+  ];
+}

@@ -243,8 +243,8 @@ export type TradeStatus = "pending" | "closed";
 export type TradeSource = "ai" | "manual" | "backtest" | "radar";
 
 /** Trade-management variant. Entry logic is identical for both — only exit management differs. */
-export type TmMode = "classic" | "tm110" | "eff2slg";
-export type ExitKind = "target" | "be" | "stop" | "time" | "stale";
+export type TmMode = "classic" | "tm110" | "eff2slg" | "runner";
+export type ExitKind = "target" | "be" | "stop" | "time" | "stale" | "struct";
 
 /** Journal exit-reason tag — attached to every closed trade */
 export type ExitReason = "SL" | "TP1" | "TP2" | "BE" | "time-exit" | "invalidation" | "manual";
@@ -454,8 +454,9 @@ export interface BacktestTrade {
   confluences: string[];
   signalType: SignalType;
   generatedAt: number;
-  partialHit: boolean; // tm110: 50% partial filled at +1.0R (always false on baseline)
-  exitKind: ExitKind;  // target = objective filled · be = breakeven stop · stop = full stop-out · time = 60-bar mark
+  partialHit: boolean; // tm110/eff2slg/runner: 50% partial filled at +1.0R (always false on baseline)
+  exitKind: ExitKind;  // target = objective/trail filled · be = breakeven stop · stop = full stop-out · time = bar mark · stale = pre-partial cut · struct = opposite BOS/CHoCH (runner)
+  holdBars?: number;   // candles from entry fill to final close (runner smoke analytics)
 }
 
 export interface ExpiryLogItem { i: number; t: number; direction: Direction; signalType: SignalType; reason: string }
@@ -492,7 +493,9 @@ export interface BacktestResult {
   grossPerTrade: number;
   costPerTrade: number;
   netPerTrade: number;
-  partialRate: number;   // % of trades where the +1R partial filled (tm110)
+  partialRate: number;   // % of trades where the +1R partial filled (tm110/runner)
+  beAfterPartialRate: number; // runner: % losses that became BE/small after the partial (tag be)
+  avgRunnerHoldBars: number;  // runner: avg candles the runner leg stayed open (partial-fill trades)
   beRate: number;        // % closed at breakeven stop
   stopOutRate: number;   // % fully stopped out
   avgWinR: number;
@@ -589,6 +592,7 @@ export interface LogLine { t: number; msg: string; kind: "info" | "ok" | "warn" 
 
 export interface SmokeArm {
   variantId: string;
+  entries: number;          // funnel.entered — the runner guard compares EXACT equality on this
   trades: number;
   winRate: number;
   slHitRate: number;        // % of closed trades fully stopped out
@@ -597,6 +601,11 @@ export interface SmokeArm {
   netPerTrade: number;
   profitFactor: number;
   maxDrawdownR: number;
+  avgWinR: number;
+  avgLossR: number;
+  partialRate: number;      // % of trades whose +1R partial filled
+  beAfterPartialRate: number; // % losses that became BE/small after the partial (tag be, net ≥ −fees)
+  avgRunnerHoldBars: number;  // avg candles the runner leg stayed open (partial-fill trades only)
   missNoConfirm: number;
   missLimitChase: number;
   missLimitUnfilled: number;
@@ -612,5 +621,18 @@ export interface SmokeReport {
   freqPass: boolean;
   slPass: boolean;          // variant SL-hit rate ≤ baseline
   overallPass: boolean;
+  dataSource: string;
+}
+
+/* ---------------- runner-v1.0.0 smoke (exit-management variant) ---------------- */
+
+export interface RunnerSmokeReport {
+  ranAt: number;
+  window: string;              // "BTC+ETH+SOL · 15M · 30D (frozen)"
+  baseline: SmokeArm;
+  variant: SmokeArm;
+  /** FREQUENCY GUARD: exact equality — variant entry count must equal baseline */
+  entriesEqual: boolean;
+  overallPass: boolean;        // = entriesEqual (revert on any drift)
   dataSource: string;
 }

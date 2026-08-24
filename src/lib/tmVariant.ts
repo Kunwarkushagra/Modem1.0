@@ -8,7 +8,7 @@ import { loadLS } from "./utils";
  * base cost model. Only trade MANAGEMENT and (from v1.2.0) additive SOFT quality
  * layers differ. Soft layers never add hard vetoes.
  */
-export type TmVariantId = "baseline-v1.0.0" | "scalp10-tm-v1.1.0" | "scalp10-adv-v1.2.0" | "scalp10-eff2-slg-v1.0.0";
+export type TmVariantId = "baseline-v1.0.0" | "scalp10-tm-v1.1.0" | "scalp10-adv-v1.2.0" | "scalp10-eff2-slg-v1.0.0" | "scalp10-runner-v1.0.0";
 
 /**
  * FREQUENCY GUARD — quality improvements must not collapse trade frequency.
@@ -55,6 +55,8 @@ export interface TmVariantDef {
   /** eff2-slg v1.0.0 Part B: SL-Shield execution rules (confirmation trigger, maker-limit entry, stale exit) */
   slShield: boolean;
   management: string;
+  /** one-line management plan shown on radar cards so paper trades match the backtested management */
+  planShort: string;
   partial: { atR: number; closePct: number; thenSl: "breakeven" } | null;
   runner: string;
   timeExitBars: number;
@@ -76,6 +78,7 @@ export const TM_VARIANTS: TmVariantDef[] = [
     eff2: false,
     slShield: false,
     management: "Full position: TP1 (next liquidity/SR, floor 2.05R) → SL to breakeven → TP2 (2nd pool / range extreme, floor 2.8R→3.2R). 60-bar time mark.",
+    planShort: "TP1 → SL@BE → TP2 · 60-bar mark",
     partial: null,
     runner: "—",
     timeExitBars: 60,
@@ -91,6 +94,7 @@ export const TM_VARIANTS: TmVariantDef[] = [
     eff2: false,
     slShield: false,
     management: TM110_MANAGEMENT,
+    planShort: "50% @ +1R → SL@BE → runner TP2 · 60-bar mark",
     partial: { atR: 1.0, closePct: 50, thenSl: "breakeven" },
     runner: TM110_RUNNER,
     timeExitBars: 60,
@@ -106,6 +110,7 @@ export const TM_VARIANTS: TmVariantDef[] = [
     eff2: false,
     slShield: false,
     management: TM110_MANAGEMENT,
+    planShort: "50% @ +1R → SL@BE → runner TP2 · 60-bar mark",
     partial: { atR: 1.0, closePct: 50, thenSl: "breakeven" },
     runner: TM110_RUNNER,
     timeExitBars: 60,
@@ -132,6 +137,7 @@ export const TM_VARIANTS: TmVariantDef[] = [
       "maker-limit entry at zone edge (3-candle fill window, cancel if chased ≥0.5R) gated by a " +
       "confirmation candle (directional close, body ≥60% of range); stale-momentum exit if +0.5R not " +
       "reached within 12 candles. Wide structural SL, costs on every leg, no lookahead.",
+    planShort: "maker-limit + confirm → 50% @ +1R → SL@BE → runner · stale@12c",
     partial: { atR: 1.0, closePct: 50, thenSl: "breakeven" },
     runner: TM110_RUNNER,
     timeExitBars: 60,
@@ -150,6 +156,36 @@ export const TM_VARIANTS: TmVariantDef[] = [
       "  maker-limit entry at zone edge; cancel (miss:limit-chased) if ≥0.5R move unfilled in 3 candles",
       "  reclaim-speed: trap score +3 if sweep reclaims within ≤2 candles (ranking only)",
       "  stale-momentum exit at 12th candle close if +0.5R not reached (tag stale)",
+    ],
+  },
+  {
+    id: "scalp10-runner-v1.0.0",
+    label: "RUNNER v1.0.0",
+    short: "RUNNER",
+    mode: "runner",
+    advQuality: false,
+    eff2: false,
+    slShield: false,
+    management:
+      "Exit-management only — entry, gates, V1–V6, initial structural SL, validity, costs and backtest " +
+      "methodology are the baseline's, byte-for-byte. Partial: 50% off at +1.0R, SL → breakeven on the rest. " +
+      "Runner (remaining 50%): no fixed TP2 (a baseline TP2 is only an optional milestone); trail at " +
+      "1.5×ATR(setup TF) floored at breakeven, updated each confirmed close; exit on an opposite CHoCH/BOS on the " +
+      "setup TF (HTF collapses to STF in backtest — documented). Pre-partial stale cut at 40 exec candles (tag stale); " +
+      "after the partial the runner has no time limit. Goal: let winners run so a ~40% win rate stays net positive.",
+    planShort: "50% @ +1R → SL@BE → 1.5×ATR trail → opp. CHoCH/BOS exit · 40c stale cut",
+    partial: { atR: 1.0, closePct: 50, thenSl: "breakeven" },
+    runner: "No fixed TP2 (optional milestone only) · 1.5×ATR trail floored at BE · opposite CHoCH/BOS exit · no time limit after partial",
+    timeExitBars: 40,
+    costs: COSTS_LINE + " · entry leg maker · partial/runner exit legs 50% weight",
+    qualityLayers: [
+      "RUNNER (exit-only) — entry pipeline identical to baseline; FREQUENCY GUARD = exact entry-count equality:",
+      "  partial: close 50% at +1.0R, move SL to breakeven on the remaining 50%",
+      "  runner: trail = max(BE, close − 1.5×ATR) for longs / min(BE, close + 1.5×ATR) for shorts, ratcheted per confirmed close",
+      "  runner exit on opposite CHoCH/BOS (setup TF; HTF folds to STF in backtest) — tagged struct",
+      "  TP2 is an optional milestone, never a forced runner exit",
+      "  pre-partial stale cut: full market close at 40 exec candles if +1R not reached (tag stale)",
+      "  no time limit on the runner after the partial fills",
     ],
   },
 ];
@@ -195,5 +231,25 @@ export function loadEff2Gate(): FrequencyGate {
     return { ok: false, detail: "eff2-slg smoke FAIL — additions reverted until a passing smoke run" };
   } catch {
     return { ok: null, detail: "eff2-slg gate unreadable" };
+  }
+}
+
+export const LS_RUNNER_KEY = "tv_runner_smoke_v1";
+
+/**
+ * runner-v1.0.0 gate — EXACT-ENTRY-EQUALITY guard. The variant is a pure exit-management
+ * change, so it must produce exactly the baseline's number of entries; any drift means the
+ * shared entry pipeline was disturbed and the variant is reverted. null = no smoke stored
+ * yet → the variant stays a bench slot (hidden from the radar selector) until a PASS.
+ */
+export function loadRunnerGate(): FrequencyGate {
+  try {
+    const r = loadLS<{ overallPass?: boolean; entriesEqual?: boolean; baseline?: { entries?: number }; variant?: { entries?: number } } | null>(LS_RUNNER_KEY, null);
+    if (!r) return { ok: null, detail: "runner OFF — no smoke stored; it is a bench slot until RUNNER-SMOKE passes" };
+    if (r.entriesEqual && r.overallPass)
+      return { ok: true, detail: `runner smoke PASS — entries exactly equal baseline (${r.variant?.entries ?? "?"}) — variant qualified` };
+    return { ok: false, detail: `runner smoke FAIL — entries drifted (variant ${r.variant?.entries ?? "?"} vs baseline ${r.baseline?.entries ?? "?"}) — reverted` };
+  } catch {
+    return { ok: null, detail: "runner gate unreadable" };
   }
 }

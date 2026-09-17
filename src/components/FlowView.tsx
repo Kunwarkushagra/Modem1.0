@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AggTrade, FlowSnapshot, FlowState, FlowTimeframe } from "../lib/types";
 import { fetchAggTrades, fetchDepth, fetchKlines, updateFlow, wsManager } from "../lib/orderFlow";
 import { getCachedFlow, setCachedFlow } from "../lib/flowCache";
+import { logFlowSignal } from "../lib/flowLog";
 import { fmtIST } from "../lib/utils";
 import { Badge, Btn, Card, IFlow, IRefresh, IWarn, Segmented, useToast } from "./ui";
 
@@ -145,6 +146,19 @@ export function FlowView({ symbol, onSymbolChange, settings }: FlowViewProps) {
       setCachedFlow(symbol, snap);
     });
   }, [state, settings, symbol]);
+
+  // PATCH: Log FLOW signals for forward tracking
+  useEffect(() => {
+    if (!snapshot || !state) return;
+    
+    // Only log when we have a valid signal (score === 3 && direction !== null)
+    if (snapshot.score === 3 && snapshot.direction !== null) {
+      const entryPrice = state.candles[state.candles.length - 1]?.c ?? 0;
+      if (entryPrice > 0) {
+        logFlowSignal(snapshot, entryPrice);
+      }
+    }
+  }, [snapshot, state]);
 
   // draw CVD chart
   useEffect(() => {

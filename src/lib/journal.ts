@@ -39,6 +39,16 @@ export const DEFAULT_SETTINGS: Settings = {
   universeVolFloorPct: 1.5,
   universeChangeCapEnabled: false,
   universeChangeCapPct: 25,
+  flowSettings: {
+    lookbackCandles: 20,
+    sweepPercent: 0.05,
+    wallMultiplier: 3,
+    absorptionThreshold: 0.02,
+    cvdNetRatio: 0.10,
+    wallPersistMs: 3000,
+    feeBps: 5,
+    slippageBps: 2,
+  },
 };
 
 /** Validate + normalise the radar universe: uppercase, trim, dedupe, force USDT/USDC quote for crypto. */

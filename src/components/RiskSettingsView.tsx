@@ -5,7 +5,7 @@ import { computePosition, sendTelegram } from "../lib/ai";
 import { clearTop30 } from "../lib/cache";
 import { deleteTrade, normaliseRadarSymbols } from "../lib/journal";
 import { fmtMoney, fmtNum, saveLS, cls } from "../lib/utils";
-import { Badge, Btn, Card, IGear, IRadar, IShield, IZap, Stat, useToast } from "./ui";
+import { Badge, Btn, Card, IGear, IFlow, IRadar, IShield, IZap, Stat, useToast } from "./ui";
 
 const inp = "w-full rounded-md border border-ink-500 bg-ink-900 px-2.5 py-1.5 font-mono text-xs text-fog-100 outline-none focus:border-gold-600/70";
 const lbl = "mb-1 block font-mono text-[10px] tracking-widest text-fog-500";
@@ -371,6 +371,71 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
               Production: deploy <span className="font-mono text-fog-300">server/api-ai-insight.ts</span> as <span className="font-mono text-fog-300">/api/ai-insight</span> — it reads <span className="font-mono text-fog-300">GEMINI_API_KEY</span> from env, whitelists the payload fields, and the key never reaches the browser (cards pick the route up automatically). In this static build the key above stays in your browser and goes straight to Gemini. Insights are cached 6h per signal, one call at a time, and are <span className="text-fog-300">opinion only</span> — they never touch gates, scoring, validity, or the backtest.
             </p>
           </div>
+        </Card>
+
+        <Card icon={<IFlow size={15} />} title="FLOW Tab (display-only)">
+          <p className="mb-3 text-[10.5px] leading-relaxed text-fog-400">
+            FLOW thresholds for institutional entry zone detection. All values are read-only from live Binance data — no strategy changes.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className={lbl}>LOOKBACK CANDLES (default 20)</span>
+              <input type="number" min={5} max={100} defaultValue={s.flowSettings.lookbackCandles}
+                onBlur={(e) => {
+                  const v = Math.max(5, Math.min(100, Number(e.target.value) || 20));
+                  e.target.value = String(v);
+                  save({ flowSettings: { ...s.flowSettings, lookbackCandles: v } }, `FLOW lookback: ${v}`);
+                }} className={inp} />
+            </label>
+            <label className="block">
+              <span className={lbl}>SWEEP % (default 0.05)</span>
+              <input type="number" min={0.01} max={1} step={0.01} defaultValue={s.flowSettings.sweepPercent}
+                onBlur={(e) => {
+                  const v = Math.max(0.01, Math.min(1, Number(e.target.value) || 0.05));
+                  e.target.value = String(v);
+                  save({ flowSettings: { ...s.flowSettings, sweepPercent: v } }, `FLOW sweep: ${v}%`);
+                }} className={inp} />
+            </label>
+            <label className="block">
+              <span className={lbl}>WALL MULTIPLIER (default 3)</span>
+              <input type="number" min={1} max={10} step={0.5} defaultValue={s.flowSettings.wallMultiplier}
+                onBlur={(e) => {
+                  const v = Math.max(1, Math.min(10, Number(e.target.value) || 3));
+                  e.target.value = String(v);
+                  save({ flowSettings: { ...s.flowSettings, wallMultiplier: v } }, `FLOW wall multiplier: ${v}x`);
+                }} className={inp} />
+            </label>
+            <label className="block">
+              <span className={lbl}>ABSORPTION % (default 0.02)</span>
+              <input type="number" min={0.01} max={0.5} step={0.01} defaultValue={s.flowSettings.absorptionThreshold}
+                onBlur={(e) => {
+                  const v = Math.max(0.01, Math.min(0.5, Number(e.target.value) || 0.02));
+                  e.target.value = String(v);
+                  save({ flowSettings: { ...s.flowSettings, absorptionThreshold: v } }, `FLOW absorption: ${v}%`);
+                }} className={inp} />
+            </label>
+            <label className="block">
+              <span className={lbl}>CVD NET RATIO (default 0.10)</span>
+              <input type="number" min={0.01} max={1} step={0.01} defaultValue={s.flowSettings.cvdNetRatio}
+                onBlur={(e) => {
+                  const v = Math.max(0.01, Math.min(1, Number(e.target.value) || 0.10));
+                  e.target.value = String(v);
+                  save({ flowSettings: { ...s.flowSettings, cvdNetRatio: v } }, `FLOW CVD net ratio: ${v}`);
+                }} className={inp} />
+            </label>
+            <label className="block">
+              <span className={lbl}>WALL PERSIST MS (default 3000)</span>
+              <input type="number" min={1000} max={30000} step={500} defaultValue={s.flowSettings.wallPersistMs}
+                onBlur={(e) => {
+                  const v = Math.max(1000, Math.min(30000, Number(e.target.value) || 3000));
+                  e.target.value = String(v);
+                  save({ flowSettings: { ...s.flowSettings, wallPersistMs: v } }, `FLOW wall persist: ${v}ms`);
+                }} className={inp} />
+            </label>
+          </div>
+          <p className="mt-3 text-[10px] leading-relaxed text-fog-500">
+            FLOW tab uses live Binance REST + WS (no keys needed). Conditions: liquidity sweep (lookback × sweep%), CVD divergence (30-min rolling), bid/ask absorption (wall multiplier × absorption%). Score 0-3 shown on radar cards when cached.
+          </p>
         </Card>
 
         <Card icon={<IGear size={15} />} title="Data & Storage">

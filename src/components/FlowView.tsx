@@ -22,6 +22,8 @@ interface FlowViewProps {
     absorptionThreshold: number;
     cvdNetRatio: number;
     wallPersistMs: number;
+    feeBps: number;
+    slippageBps: number;
   };
 }
 
@@ -155,7 +157,7 @@ export function FlowView({ symbol, onSymbolChange, settings }: FlowViewProps) {
     if (snapshot.score === 3 && snapshot.direction !== null) {
       const entryPrice = state.candles[state.candles.length - 1]?.c ?? 0;
       if (entryPrice > 0) {
-        logFlowSignal(snapshot, entryPrice);
+        logFlowSignal(snapshot, state.candles, settings);
       }
     }
   }, [snapshot, state]);

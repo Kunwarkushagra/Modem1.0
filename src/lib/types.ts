@@ -723,6 +723,8 @@ export interface FlowSettings {
   absorptionThreshold: number; // price move % for absorption (default 0.02)
   cvdNetRatio: number;         // CVD divergence tolerance (default 0.10)
   wallPersistMs: number;       // wall persistence time in ms (default 3000)
+  feeBps: number;              // fee in basis points (default 5)
+  slippageBps: number;         // slippage in basis points (default 2)
 }
 
 export interface FlowCondition {

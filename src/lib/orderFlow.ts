@@ -202,19 +202,21 @@ export function detectSweep(candles: Candle[], settings: FlowSettings): SweepRes
     }
   }
 
-  // PATCH 1 FIX: If sweep found, check if reclaimed AFTER sweep (not before)
-  if (sweepIndex >= 0) {
-    // Check if any candle from sweepIndex onwards closed above swingLow
-    const reclaimed = candles.slice(sweepIndex).some((c) => c.c > swingLow);
-    
-    // PATCH 1 FIX: If last candle closes below swingLow, it's a breakdown, not a sweep
-    if (lastCandle.c < swingLow) {
-      return { pass: false, value: `${sweepDepth.toFixed(3)}% breakdown (close below)`, direction: null };
-    }
-    
-    if (reclaimed) {
-      return { pass: true, value: `${sweepDepth.toFixed(3)}% below ${swingLow.toFixed(2)}`, direction: "LONG" };
-    }
+  // FIX 1: Guard against sweepIndex === -1 before computing reclaim
+  if (sweepIndex === -1) {
+    return { pass: false, value: "no sweep", direction: null };
+  }
+  
+  // Check if any candle from sweepIndex onwards closed above swingLow
+  const reclaimedLong = candles.slice(sweepIndex).some((c) => c.c > swingLow);
+  
+  // If last candle closes below swingLow, it's a breakdown, not a sweep
+  if (lastCandle.c < swingLow) {
+    return { pass: false, value: `${sweepDepth.toFixed(3)}% breakdown (close below)`, direction: null };
+  }
+  
+  if (reclaimedLong) {
+    return { pass: true, value: `${sweepDepth.toFixed(3)}% below ${swingLow.toFixed(2)}`, direction: "LONG" };
   }
 
   // check for sweep above swing high (mirror logic)
@@ -233,17 +235,20 @@ export function detectSweep(candles: Candle[], settings: FlowSettings): SweepRes
     }
   }
 
-  if (sweepIndexHigh >= 0) {
-    const reclaimed = candles.slice(sweepIndexHigh).some((c) => c.c < swingHigh);
-    
-    // If last candle closes above swingHigh, it's a breakdown, not a sweep
-    if (lastCandle.c > swingHigh) {
-      return { pass: false, value: `${sweepDepthAbove.toFixed(3)}% breakdown (close above)`, direction: null };
-    }
-    
-    if (reclaimed) {
-      return { pass: true, value: `${sweepDepthAbove.toFixed(3)}% above ${swingHigh.toFixed(2)}`, direction: "SHORT" };
-    }
+  // FIX 1: Guard against sweepIndexHigh === -1 before computing reclaim
+  if (sweepIndexHigh === -1) {
+    return { pass: false, value: "no sweep", direction: null };
+  }
+  
+  const reclaimedShort = candles.slice(sweepIndexHigh).some((c) => c.c < swingHigh);
+  
+  // If last candle closes above swingHigh, it's a breakdown, not a sweep
+  if (lastCandle.c > swingHigh) {
+    return { pass: false, value: `${sweepDepthAbove.toFixed(3)}% breakdown (close above)`, direction: null };
+  }
+  
+  if (reclaimedShort) {
+    return { pass: true, value: `${sweepDepthAbove.toFixed(3)}% above ${swingHigh.toFixed(2)}`, direction: "SHORT" };
   }
 
   return { pass: false, value: sweepDepth > 0 ? `${sweepDepth.toFixed(3)}% (no reclaim)` : "no sweep", direction: null };
@@ -270,15 +275,13 @@ export function detectCVD(trades: AggTrade[], candles: Candle[], settings: FlowS
 
   // calculate CVD (cumulative volume delta)
   let cvd = 0;
-  let grossVolume = 0;
-  const cvdPoints: Array<{ t: number; cvd: number }> = [];
+  const cvdPoints: Array<{ t: number; cvd: number; qty: number }> = [];
 
   for (const trade of recentTrades) {
     const qty = parseFloat(trade.q);
     const delta = trade.m ? -qty : qty; // m=true means buyer is maker (sell)
     cvd += delta;
-    grossVolume += qty;
-    cvdPoints.push({ t: trade.T, cvd });
+    cvdPoints.push({ t: trade.T, cvd, qty });
   }
 
   // PATCH 2 FIX: priceLowerLow compares to min of last 5 candles, not just previous
@@ -301,40 +304,41 @@ export function detectCVD(trades: AggTrade[], candles: Candle[], settings: FlowS
   const cvdEnd = recentCVD[recentCVD.length - 1].cvd;
   const cvdTrend = cvdEnd - cvdStart;
 
-  // PATCH 2 FIX: Calculate netRatio with tolerance check
-  const netRatio = grossVolume > 0 ? Math.abs(cvdTrend) / grossVolume : 0;
+  // FIX 2: Calculate grossVolume over the SAME recent segment used for cvdTrend
+  const segmentGrossVolume = recentCVD.reduce((sum, p) => sum + p.qty, 0);
+  const flipRatio = segmentGrossVolume > 0 ? Math.abs(cvdEnd - cvdStart) / segmentGrossVolume : 0;
   const cvdNetRatioThreshold = settings.cvdNetRatio ?? 0.10;
 
   // bullish divergence: price lower low + CVD higher low (positive trend) with tolerance
-  if (priceLowerLow && cvdTrend > 0 && netRatio >= cvdNetRatioThreshold) {
-    return { pass: true, value: `bullish div (price LL, CVD +${cvdTrend.toFixed(0)}, ratio ${netRatio.toFixed(2)})`, direction: "LONG" };
+  if (priceLowerLow && cvdTrend > 0 && flipRatio >= cvdNetRatioThreshold) {
+    return { pass: true, value: `bullish div (price LL, CVD +${cvdTrend.toFixed(0)}, ratio ${flipRatio.toFixed(2)})`, direction: "LONG" };
   }
 
   // bearish divergence: price higher high + CVD lower high (negative trend) with tolerance
-  if (priceHigherHigh && cvdTrend < 0 && netRatio >= cvdNetRatioThreshold) {
-    return { pass: true, value: `bearish div (price HH, CVD ${cvdTrend.toFixed(0)}, ratio ${netRatio.toFixed(2)})`, direction: "SHORT" };
+  if (priceHigherHigh && cvdTrend < 0 && flipRatio >= cvdNetRatioThreshold) {
+    return { pass: true, value: `bearish div (price HH, CVD ${cvdTrend.toFixed(0)}, ratio ${flipRatio.toFixed(2)})`, direction: "SHORT" };
   }
 
-  // PATCH 2 FIX: delta flip requires proximity to sweepLow (within 0.10%)
+  // FIX 2: delta flip requires proximity to sweepLow (within 0.10%) AND flipRatio tolerance
   // Find recent sweep low for proximity check
   const recentLows = candles.slice(-20).map((c) => c.l);
   const sweepLow = Math.min(...recentLows);
   const proximityToSweepLow = Math.abs((lastCandle.c - sweepLow) / sweepLow) * 100;
   const proximityThreshold = 0.10; // 0.10%
 
-  if (cvdStart < 0 && cvdEnd > 0 && priceLowerLow && proximityToSweepLow <= proximityThreshold) {
-    return { pass: true, value: `delta flip (+${cvdTrend.toFixed(0)}, ${proximityToSweepLow.toFixed(2)}% from sweep)`, direction: "LONG" };
+  if (cvdStart < 0 && cvdEnd > 0 && priceLowerLow && proximityToSweepLow <= proximityThreshold && flipRatio >= cvdNetRatioThreshold) {
+    return { pass: true, value: `delta flip (+${cvdTrend.toFixed(0)}, ${proximityToSweepLow.toFixed(2)}% from sweep, ratio ${flipRatio.toFixed(2)})`, direction: "LONG" };
   }
 
   const recentHighs = candles.slice(-20).map((c) => c.h);
   const sweepHigh = Math.max(...recentHighs);
   const proximityToSweepHigh = Math.abs((lastCandle.c - sweepHigh) / sweepHigh) * 100;
 
-  if (cvdStart > 0 && cvdEnd < 0 && priceHigherHigh && proximityToSweepHigh <= proximityThreshold) {
-    return { pass: true, value: `delta flip (${cvdTrend.toFixed(0)}, ${proximityToSweepHigh.toFixed(2)}% from sweep)`, direction: "SHORT" };
+  if (cvdStart > 0 && cvdEnd < 0 && priceHigherHigh && proximityToSweepHigh <= proximityThreshold && flipRatio >= cvdNetRatioThreshold) {
+    return { pass: true, value: `delta flip (${cvdTrend.toFixed(0)}, ${proximityToSweepHigh.toFixed(2)}% from sweep, ratio ${flipRatio.toFixed(2)})`, direction: "SHORT" };
   }
 
-  return { pass: false, value: `CVD ${cvdTrend >= 0 ? "+" : ""}${cvdTrend.toFixed(0)}, ratio ${netRatio.toFixed(2)}`, direction: null };
+  return { pass: false, value: `CVD ${cvdTrend >= 0 ? "+" : ""}${cvdTrend.toFixed(0)}, ratio ${flipRatio.toFixed(2)}`, direction: null };
 }
 
 interface AbsorptionResult {
@@ -343,12 +347,13 @@ interface AbsorptionResult {
   direction: "LONG" | "SHORT" | null;
 }
 
-// PATCH 3: Wall registry for persistence tracking
+// FIX 3: Wall registry for persistence tracking
 interface WallEntry {
   firstSeen: number;
   lastSeen: number;
   size: number;
   price: number;
+  stepUp: boolean;
 }
 
 const wallRegistry = new Map<string, WallEntry>();
@@ -377,23 +382,26 @@ export function detectAbsorption(
   const medianBid = sortedBids[Math.floor(sortedBids.length / 2)].qty;
   const medianAsk = sortedAsks[Math.floor(sortedAsks.length / 2)].qty;
 
-  // PATCH 3: Update wall registry with current snapshot
+  // FIX 3: Update wall registry with current snapshot
   const wallThresholdBid = medianBid * settings.wallMultiplier;
   const wallThresholdAsk = medianAsk * settings.wallMultiplier;
 
   // Track bid walls
   for (const bid of top15Bids) {
     if (bid.qty >= wallThresholdBid) {
+      // FIX 3: key must be price level rounded to symbol tick size (stable key)
       const key = `bid_${bid.price.toFixed(2)}`;
       const existing = wallRegistry.get(key);
       if (existing) {
-        // PATCH 3: Step-up logic - wall size must be >= firstSeen * 1.05 or be a new wall
+        // FIX 3: refresh lastSeen on EVERY sighting
+        existing.lastSeen = now;
+        // Step-up logic - wall size must be >= firstSeen * 1.05 to update size
         if (bid.qty >= existing.size * 1.05) {
-          existing.lastSeen = now;
           existing.size = bid.qty;
+          existing.stepUp = true;
         }
       } else {
-        wallRegistry.set(key, { firstSeen: now, lastSeen: now, size: bid.qty, price: bid.price });
+        wallRegistry.set(key, { firstSeen: now, lastSeen: now, size: bid.qty, price: bid.price, stepUp: false });
       }
     }
   }
@@ -404,24 +412,35 @@ export function detectAbsorption(
       const key = `ask_${ask.price.toFixed(2)}`;
       const existing = wallRegistry.get(key);
       if (existing) {
+        // FIX 3: refresh lastSeen on EVERY sighting
+        existing.lastSeen = now;
         if (ask.qty >= existing.size * 1.05) {
-          existing.lastSeen = now;
           existing.size = ask.qty;
+          existing.stepUp = true;
         }
       } else {
-        wallRegistry.set(key, { firstSeen: now, lastSeen: now, size: ask.qty, price: ask.price });
+        wallRegistry.set(key, { firstSeen: now, lastSeen: now, size: ask.qty, price: ask.price, stepUp: false });
       }
     }
   }
 
-  // PATCH 3: Count only persistent walls (lastSeen - firstSeen >= wallPersistMs)
-  const persistentBidWalls = Array.from(wallRegistry.values()).filter(
-    (w) => w.price && now - w.firstSeen >= wallPersistMs && now - w.lastSeen < 1000 // still present
+  // FIX 3: prune stale entries every update
+  for (const [k, w] of wallRegistry) {
+    if (now - w.lastSeen > 2000) {
+      wallRegistry.delete(k);
+    }
+  }
+
+  // FIX 3: count = persistent + size threshold
+  const persistentBidWalls = Array.from(wallRegistry.values()).filter((w) =>
+    now - w.firstSeen >= (settings.wallPersistMs ?? 3000) &&
+    w.size >= medianBid * (settings.wallMultiplier ?? 3)
   );
   const bidWallCount = persistentBidWalls.length;
 
-  const persistentAskWalls = Array.from(wallRegistry.values()).filter(
-    (w) => w.price && now - w.firstSeen >= wallPersistMs && now - w.lastSeen < 1000
+  const persistentAskWalls = Array.from(wallRegistry.values()).filter((w) =>
+    now - w.firstSeen >= (settings.wallPersistMs ?? 3000) &&
+    w.size >= medianAsk * (settings.wallMultiplier ?? 3)
   );
   const askWallCount = persistentAskWalls.length;
 

@@ -46,6 +46,8 @@ export const DEFAULT_SETTINGS: Settings = {
     absorptionThreshold: 0.02,
     cvdNetRatio: 0.10,
     wallPersistMs: 3000,
+    feeBps: 5,
+    slippageBps: 2,
   },
 };
 

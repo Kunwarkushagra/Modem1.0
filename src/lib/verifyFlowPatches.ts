@@ -25,6 +25,8 @@ const defaultSettings: FlowSettings = {
   absorptionThreshold: 0.02,
   cvdNetRatio: 0.10,
   wallPersistMs: 3000,
+  feeBps: 5,
+  slippageBps: 2,
 };
 
 console.log('=== FLOW Logic Patch Verification ===\n');

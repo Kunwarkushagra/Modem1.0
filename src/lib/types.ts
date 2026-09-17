@@ -721,6 +721,8 @@ export interface FlowSettings {
   sweepPercent: number;        // minimum sweep depth % (default 0.05)
   wallMultiplier: number;      // wall size vs median threshold (default 3)
   absorptionThreshold: number; // price move % for absorption (default 0.02)
+  cvdNetRatio: number;         // CVD divergence tolerance (default 0.10)
+  wallPersistMs: number;       // wall persistence time in ms (default 3000)
 }
 
 export interface FlowCondition {

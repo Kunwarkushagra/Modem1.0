@@ -19,6 +19,8 @@ interface FlowViewProps {
     sweepPercent: number;
     wallMultiplier: number;
     absorptionThreshold: number;
+    cvdNetRatio: number;
+    wallPersistMs: number;
   };
 }
 

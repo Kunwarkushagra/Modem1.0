@@ -44,6 +44,8 @@ export const DEFAULT_SETTINGS: Settings = {
     sweepPercent: 0.05,
     wallMultiplier: 3,
     absorptionThreshold: 0.02,
+    cvdNetRatio: 0.10,
+    wallPersistMs: 3000,
   },
 };
 

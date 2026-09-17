@@ -414,6 +414,24 @@ export function SettingsView(props: { settings: Settings; onSave: (s: Settings) 
                   save({ flowSettings: { ...s.flowSettings, absorptionThreshold: v } }, `FLOW absorption: ${v}%`);
                 }} className={inp} />
             </label>
+            <label className="block">
+              <span className={lbl}>CVD NET RATIO (default 0.10)</span>
+              <input type="number" min={0.01} max={1} step={0.01} defaultValue={s.flowSettings.cvdNetRatio}
+                onBlur={(e) => {
+                  const v = Math.max(0.01, Math.min(1, Number(e.target.value) || 0.10));
+                  e.target.value = String(v);
+                  save({ flowSettings: { ...s.flowSettings, cvdNetRatio: v } }, `FLOW CVD net ratio: ${v}`);
+                }} className={inp} />
+            </label>
+            <label className="block">
+              <span className={lbl}>WALL PERSIST MS (default 3000)</span>
+              <input type="number" min={1000} max={30000} step={500} defaultValue={s.flowSettings.wallPersistMs}
+                onBlur={(e) => {
+                  const v = Math.max(1000, Math.min(30000, Number(e.target.value) || 3000));
+                  e.target.value = String(v);
+                  save({ flowSettings: { ...s.flowSettings, wallPersistMs: v } }, `FLOW wall persist: ${v}ms`);
+                }} className={inp} />
+            </label>
           </div>
           <p className="mt-3 text-[10px] leading-relaxed text-fog-500">
             FLOW tab uses live Binance REST + WS (no keys needed). Conditions: liquidity sweep (lookback × sweep%), CVD divergence (30-min rolling), bid/ask absorption (wall multiplier × absorption%). Score 0-3 shown on radar cards when cached.

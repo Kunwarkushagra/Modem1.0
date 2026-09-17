@@ -333,7 +333,7 @@ export async function runRunnerSmoke(
   const t0 = performance.now();
   const cfg = RUNNER_SMOKE;
   log(contaminationNotice(), "warn");
-  for (const line of describeRunnerConfig(cfg)) log(line, "info");
+  for (const line of describeVariantSmoke(cfg)) log(line, "info");
 
   const baseDef = variantById(cfg.baselineSlot as TmVariantId);
   const varDef = variantById(cfg.variantSlot as TmVariantId);
@@ -376,6 +376,7 @@ export async function runRunnerSmoke(
   const report: RunnerSmokeReport = {
     ranAt: Date.now(),
     window: `${cfg.symbols.map((s) => s.replace("USDT", "")).join("+")} · ${cfg.timeframe.toUpperCase()} · ${cfg.days}D (frozen)`,
+    variantSlot: cfg.variantSlot,
     baseline, variant, entriesEqual, overallPass, dataSource,
   };
   saveLS(LS_RUNNER_KEY, report);

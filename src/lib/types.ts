@@ -507,6 +507,8 @@ export interface Settings {
   universeVolFloorPct: number;            // floor value, % (default 1.5)
   universeChangeCapEnabled: boolean;      // opt-in: |24h change| cap (default off)
   universeChangeCapPct: number;           // cap value, % (default 25)
+  /* ---- FLOW tab (display-only, additive) ---- */
+  flowSettings: FlowSettings;
 }
 
 export interface BacktestTrade {
@@ -701,11 +703,63 @@ export interface RunnerSmokeReport {
   overallPass: boolean;        // = entriesEqual (revert on any drift)
   dataSource: string;
   /** courseedge v1.0.0: how the ranking boosts fired across engine-cadence setups (score-only variants) */
-  scoreImpact?: {
-    setups: number;            // validated setups sampled at the engine generation cadence
-    withBonus: number;         // setups that earned ≥ 1 course-edge point
-    avgBonus: number;          // mean totalBonus across ALL sampled setups
-    avgBonusWhenHit: number;   // mean totalBonus across setups that earned something
-    byPattern: { compression: number; wedge: number; doubleSweep: number; roundNumber: number }; // hit counts
-  };
+   scoreImpact?: {
+     setups: number;            // validated setups sampled at the engine generation cadence
+     withBonus: number;         // setups that earned ≥ 1 course-edge point
+     avgBonus: number;          // mean totalBonus across ALL sampled setups
+     avgBonusWhenHit: number;   // mean totalBonus across setups that earned something
+     byPattern: { compression: number; wedge: number; doubleSweep: number; roundNumber: number }; // hit counts
+   };
+ }
+
+/* ---------------- FLOW tab types (display-only, additive) ---------------- */
+
+export type FlowTimeframe = "1m" | "5m" | "15m";
+
+export interface FlowSettings {
+  lookbackCandles: number;     // sweep detection lookback (default 20)
+  sweepPercent: number;        // minimum sweep depth % (default 0.05)
+  wallMultiplier: number;      // wall size vs median threshold (default 3)
+  absorptionThreshold: number; // price move % for absorption (default 0.02)
+}
+
+export interface FlowCondition {
+  pass: boolean;
+  value: string;               // measured value for display
+}
+
+export interface FlowSnapshot {
+  symbol: string;
+  timeframe: FlowTimeframe;
+  timestamp: number;           // UTC ms
+  sweep: FlowCondition;
+  cvd: FlowCondition;
+  absorption: FlowCondition;
+  score: number;               // 0-3 (count of passing conditions)
+  direction: "LONG" | "SHORT" | null;
+}
+
+export interface FlowCacheEntry {
+  snapshot: FlowSnapshot;
+  cachedAt: number;            // UTC ms when cached
+}
+
+export interface AggTrade {
+  a: number; // aggregate trade ID
+  p: string; // price
+  q: string; // quantity
+  f: number; // first trade ID
+  l: number; // last trade ID
+  T: number; // timestamp
+  m: boolean; // is buyer the maker?
+}
+
+export interface FlowState {
+  symbol: string;
+  timeframe: FlowTimeframe;
+  candles: Candle[];
+  trades: AggTrade[];
+  depth: { bids: Array<{ price: string; qty: string }>; asks: Array<{ price: string; qty: string }> };
+  lastUpdate: number;
+  error: string | null;
 }

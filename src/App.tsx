@@ -6,19 +6,22 @@ import type { TickerQuote } from "./lib/marketData";
 import { loadSettings, loadTrades, saveSettings } from "./lib/journal";
 import type { Trade } from "./lib/types";
 import { fmtMoney, fmtPrice, cls } from "./lib/utils";
-import { Badge, IBook, ICandles, IGear, ILogo, IRadar, IFlask, IScale, IShield, ToastProvider } from "./components/ui";
+import { Badge, IBook, ICandles, IGear, ILogo, IRadar, IFlask, IFlow, IScale, IShield, ToastProvider } from "./components/ui";
 import { TerminalView } from "./components/TerminalView";
 import { RadarView } from "./components/RadarView";
 import { JournalView } from "./components/JournalView";
 import { BacktestView } from "./components/BacktestView";
 import { BenchView } from "./components/BenchView";
+import { FlowView } from "./components/FlowView";
+import { FlowErrorBoundary } from "./components/FlowErrorBoundary";
 import { RiskView, SettingsView } from "./components/RiskSettingsView";
 
-type View = "terminal" | "radar" | "journal" | "backtest" | "bench" | "risk" | "settings";
+type View = "terminal" | "radar" | "flow" | "journal" | "backtest" | "bench" | "risk" | "settings";
 
 const NAV: Array<{ v: View; label: string; icon: (p: { size?: number; className?: string }) => ReactNode }> = [
   { v: "terminal", label: "Terminal", icon: ICandles },
   { v: "radar", label: "Radar", icon: IRadar },
+  { v: "flow", label: "Flow", icon: IFlow },
   { v: "journal", label: "Journal", icon: IBook },
   { v: "backtest", label: "Backtest", icon: IFlask },
   { v: "bench", label: "Bench", icon: IScale },
@@ -74,6 +77,7 @@ function Shell() {
   const [trades, setTrades] = useState<Trade[]>(() => loadTrades());
   const [btPrefill, setBtPrefill] = useState<{ symbol: string; assetType: AssetType; timeframe: Timeframe; runId: number } | null>(null);
   const [termHandoff, setTermHandoff] = useState<{ symbol: string; assetType: AssetType; timeframe: Timeframe; runId: number } | null>(null);
+  const [flowSymbol, setFlowSymbol] = useState<string>("BTCUSDT");
 
   const reloadTrades = useCallback(() => setTrades(loadTrades()), []);
   const persistSettings = useCallback((s: Settings) => { setSettings(s); saveSettings(s); }, []);
@@ -148,6 +152,11 @@ function Shell() {
         )}
         {view === "radar" && (
           <RadarView settings={settings} onSettingsChange={patchSettings} onOpenInTerminal={openInTerminal} />
+        )}
+        {view === "flow" && (
+          <FlowErrorBoundary>
+            <FlowView symbol={flowSymbol} onSymbolChange={setFlowSymbol} settings={settings.flowSettings} />
+          </FlowErrorBoundary>
         )}
         {view === "journal" && <JournalView trades={trades} onChanged={reloadTrades} />}
         {view === "backtest" && <BacktestView prefill={btPrefill} />}

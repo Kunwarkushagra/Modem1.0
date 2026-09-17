@@ -11,8 +11,9 @@ import { applyUniverseGuards, parseExtraExcludes } from "../lib/universe";
 import type { ExcludedEntry, UniverseCfg } from "../lib/universe";
 import { addTrade, loadTrades } from "../lib/journal";
 import { loadCourseEdgeGate, loadFrequencyGate, TM_VARIANTS, variantById } from "../lib/tmVariant";
+import { getCachedFlow } from "../lib/flowCache";
 import { cls, fmtIST, fmtPrice, fmtTime, TF_MINUTES } from "../lib/utils";
-import { Badge, Btn, Card, IBrain, ICandles, ICheck, IPlus, IRadar, IRefresh, IWarn, IX, Segmented, useToast } from "./ui";
+import { Badge, Btn, Card, IBrain, ICandles, ICheck, IFlow, IPlus, IRadar, IRefresh, IWarn, IX, Segmented, useToast } from "./ui";
 
 const blank = (symbol: string): SymbolScanState => ({ symbol, status: "idle", lastScanAt: 0, lastCloseEpoch: 0, lastPrice: null, error: null, candidatesFound: 0 });
 const ZERO_FUNNEL: ScanFunnel = { generated: 0, passedGates: 0, passedFloor: 0 };
@@ -114,6 +115,12 @@ function RadarCard(props: {
   const costInR = risk > 0 ? (s.entry_price * COSTS.entryPct + s.take_profit1 * COSTS.exitPct) / risk : 0;
   const costTone = costInR <= 0.3 ? "bull" : costInR <= 0.5 ? "warn" : "bear";
 
+  // FLOW score chip: read from cache if available (display-only, never affects scoring)
+  const flowCached = getCachedFlow(c.symbol);
+  const flowScore = flowCached?.score ?? null;
+  const flowDirection = flowCached?.direction ?? null;
+  const flowAge = flowCached ? Math.floor((Date.now() - flowCached.timestamp) / 60000) : null;
+
   // Format a possibly-numeric AI-restated invalidation back to tick precision.
   const fmtRestated = (raw: string): string => {
     const t = raw.trim();
@@ -202,6 +209,17 @@ function RadarCard(props: {
             >
               COST {costInR.toFixed(2)}R
             </span>
+            {flowScore !== null && (
+              <span
+                className={cls(
+                  "flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[8.5px] font-bold tracking-wider",
+                  flowScore === 3 ? "border-gold-600/50 bg-gold-500/10 text-gold-300" : "border-ink-500 bg-ink-700/50 text-fog-400",
+                )}
+                title={flowAge !== null ? `FLOW score from ${flowAge}m ago · ${flowDirection ?? "no direction"}` : "FLOW score"}
+              >
+                <IFlow size={9} /> {flowScore}/3
+              </span>
+            )}
             <span className="font-mono text-[9px] text-fog-500">#{rank + 1}</span>
           </div>
           <div className="mt-0.5 font-mono text-[9.5px] tracking-wider text-fog-500">
